@@ -4,8 +4,10 @@ The `tests/load` directory contains two benchmarks with different purposes:
 
 - `test:benchmark:invalidation` is a synthetic Redis-only keyspace-scaling
   microbenchmark. It does not exercise Prisma or PostgreSQL.
-- `test:benchmark:load` is a model-backed workload that runs real Prisma
-  `Widget` and `Part` operations against PostgreSQL and Redis.
+- `test:benchmark:load` is a model-backed workload that runs real cached Prisma
+  `Widget` and `Part` unique/list operations against PostgreSQL and Redis. Its
+  shared read corpus also probes distributed cold-list stampede behavior and
+  reads widget writes back through another client.
 
 ## Synthetic invalidation benchmark
 
@@ -54,4 +56,6 @@ count, errors, and freshness failures. Performance measurements are
 informational and are not CI gates; workload errors and freshness failures
 still fail the command. Normal cleanup removes only the run-specific database
 rows and Redis namespace. `--preserve` skips cleanup and prints the run ID,
-tenant IDs, and Redis key prefix for inspection.
+tenant IDs, and Redis key prefix for inspection. Warm-up requests are sampled
+and bounded, and each benchmark Prisma client is capped at one PostgreSQL
+connection so the stress profile stays within its concurrency budget.

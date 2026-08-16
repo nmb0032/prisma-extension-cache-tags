@@ -123,10 +123,13 @@ pnpm test:benchmark:load -- --preserve
 `test:benchmark:invalidation` is a synthetic keyspace-scaling microbenchmark. It
 seeds synthetic cached-query keys and measures whether generational invalidation
 cost changes as the Redis keyspace grows. `test:benchmark:load` runs real Prisma
-`Widget` and `Part` reads and writes against PostgreSQL and Redis through the
-cache extension. It uses the `quick` profile by default; `--profile stress` uses
-a larger dataset, more concurrency, and a longer measurement window for deliberate
-capacity investigations.
+`Widget` and `Part` unique/list reads and widget writes against PostgreSQL and
+Redis through the cache extension. It uses a shared read corpus to exercise
+distributed cold-list stampede protection and cross-client post-write freshness.
+The `quick` profile is the default; `--profile stress` uses a larger dataset,
+more concurrency, and a longer measurement window for deliberate capacity
+investigations. Warm-up requests are sampled and bounded, and each benchmark
+Prisma client is capped at one PostgreSQL connection.
 
 The invalidation benchmark reports p50 and p99 invalidation latency by keyspace
 and verifies the expected Redis `INCRBY` count. The model-backed report includes

@@ -9,6 +9,14 @@ const SEED_BATCH_SIZE = 100;
 const BENCHMARK_KEY_PREFIX = 'prismaCacheTags:benchmark:';
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const REDIS_GLOB_METACHARACTERS = /[*?\[\]\\]/;
+export const BENCHMARK_MAX_CONNECTIONS_PER_CLIENT = 1;
+
+export interface BenchmarkPart {
+    id: string;
+    tenantId: string;
+    label: string;
+    widgetId: string;
+}
 
 export interface BenchmarkWidget {
     id: string;
@@ -17,11 +25,19 @@ export interface BenchmarkWidget {
     workerIndex: number;
 }
 
+export interface BenchmarkReadCorpus {
+    tenantIds: string[];
+    widgets: BenchmarkWidget[];
+    parts: BenchmarkPart[];
+}
+
 export interface BenchmarkFixture {
     runId: string;
     keyPrefix: string;
     tenantIds: string[];
     widgetsByWorker: BenchmarkWidget[][];
+    readCorpus: BenchmarkReadCorpus;
+    coldListProbeCompleted: boolean;
     clients: ReturnType<typeof createCachedClient>[];
     queryCounters: QueryCounter[];
     redis: ReturnType<typeof createTestRedisClient>;
@@ -86,7 +102,7 @@ export async function createBenchmarkFixture(
 
     try {
         await redis.connect();
-        seedClient = createTestPrismaClient();
+        seedClient = createTestPrismaClient({ maxConnections: BENCHMARK_MAX_CONNECTIONS_PER_CLIENT });
         const seededWidgets = await seedBenchmarkWidgets(seedClient, profile, runId, tenantIds);
         const queryCounters = Array.from({ length: profile.concurrency }, () => createQueryCounter());
         for (const queryCounter of queryCounters) {
@@ -96,20 +112,32 @@ export async function createBenchmarkFixture(
                     metrics: metrics.cacheMetrics,
                     defaultTtlSeconds: 300,
                     maxTtlSeconds: 300,
+                }, {
+                    maxConnections: BENCHMARK_MAX_CONNECTIONS_PER_CLIENT,
                 }),
             );
         }
         const widgetsByWorker = Array.from({ length: profile.concurrency }, () => [] as BenchmarkWidget[]);
 
         for (const [index, widget] of seededWidgets.entries()) {
-            widgetsByWorker[index % profile.concurrency]!.push({
-                ...widget,
+            const benchmarkWidget = {
+                id: widget.id,
+                tenantId: widget.tenantId,
+                initialName: widget.initialName,
                 workerIndex: index % profile.concurrency,
+            };
+            widgetsByWorker[index % profile.concurrency]!.push({
+                ...benchmarkWidget,
             });
         }
 
         await seedClient.$disconnect();
         seedClient = undefined;
+        const readCorpus: BenchmarkReadCorpus = {
+            tenantIds,
+            widgets: widgetsByWorker.flat(),
+            parts: seededWidgets.flatMap((widget) => widget.parts),
+        };
 
         let cleanupPromise: Promise<void> | undefined;
         const cleanup = async (): Promise<void> => {
@@ -148,6 +176,8 @@ export async function createBenchmarkFixture(
             keyPrefix,
             tenantIds,
             widgetsByWorker,
+            readCorpus,
+            coldListProbeCompleted: false,
             clients,
             queryCounters,
             redis,
@@ -156,27 +186,29 @@ export async function createBenchmarkFixture(
         };
     } catch (error) {
         const cleanupFailures: unknown[] = [];
-        try {
-            await cleanupBenchmarkResources(
-                async () => {
-                    if (clients[0] !== undefined) {
-                        await clients[0].widget.deleteMany({
-                            where: { tenantId: { in: tenantIds } },
-                        });
-                    } else {
-                        await seedClient?.widget.deleteMany({
-                            where: { tenantId: { in: tenantIds } },
-                        });
-                    }
-                },
-                async () => {
-                    if (redis.isOpen) {
-                        await deleteRedisNamespace(redis, keyPrefix);
-                    }
-                },
-            );
-        } catch (cleanupError) {
-            cleanupFailures.push(...getFailureReasons(cleanupError));
+        if (!options.preserve) {
+            try {
+                await cleanupBenchmarkResources(
+                    async () => {
+                        if (clients[0] !== undefined) {
+                            await clients[0].widget.deleteMany({
+                                where: { tenantId: { in: tenantIds } },
+                            });
+                        } else {
+                            await seedClient?.widget.deleteMany({
+                                where: { tenantId: { in: tenantIds } },
+                            });
+                        }
+                    },
+                    async () => {
+                        if (redis.isOpen) {
+                            await deleteRedisNamespace(redis, keyPrefix);
+                        }
+                    },
+                );
+            } catch (cleanupError) {
+                cleanupFailures.push(...getFailureReasons(cleanupError));
+            }
         }
 
         const disconnectResults = await Promise.allSettled([
@@ -184,17 +216,44 @@ export async function createBenchmarkFixture(
             ...clients.map((client) => Promise.resolve().then(() => client.$disconnect())),
             Promise.resolve().then(() => closeRedisClient(redis)),
         ]);
-        const failures = [
-            error,
-            ...cleanupFailures,
-            ...disconnectResults.flatMap((result) => (result.status === 'rejected' ? getFailureReasons(result.reason) : [])),
-        ];
-        if (failures.length === 1) {
-            throw error;
+        const disconnectFailures = disconnectResults.flatMap((result) =>
+            result.status === 'rejected' ? getFailureReasons(result.reason) : [],
+        );
+        const secondaryFailures = [...cleanupFailures, ...disconnectFailures];
+        if (secondaryFailures.length === 0) {
+            throw createFixtureFailure(error, { runId, keyPrefix, tenantIds, preserve: options.preserve === true });
         }
 
-        throw new AggregateError(failures, 'Failed to create benchmark fixture');
+        throw new AggregateError(
+            [
+                error,
+                ...secondaryFailures,
+                createFixtureFailure(error, { runId, keyPrefix, tenantIds, preserve: options.preserve === true }),
+            ],
+            'Failed to create benchmark fixture',
+        );
     }
+}
+
+function createFixtureFailure(
+    error: unknown,
+    resources: { runId: string; keyPrefix: string; tenantIds: string[]; preserve: boolean },
+): Error {
+    const originalMessage = error instanceof Error ? error.message : String(error);
+    const retentionMessage = resources.preserve
+        ? 'Data was retained because --preserve was specified.'
+        : 'Automatic cleanup was attempted; retained data may remain if cleanup failed.';
+
+    return new Error(
+        [
+            originalMessage,
+            `Run ID: ${resources.runId}`,
+            `Tenant IDs: ${resources.tenantIds.join(', ')}`,
+            `Redis key prefix: ${resources.keyPrefix}`,
+            retentionMessage,
+        ].join('\n'),
+        { cause: error },
+    );
 }
 
 async function cleanupBenchmarkResources(deleteRows: () => Promise<void>, deleteRedis: () => Promise<void>): Promise<void> {
@@ -221,18 +280,27 @@ function getFailureReasons(error: unknown): unknown[] {
     return error instanceof AggregateError ? error.errors : [error];
 }
 
+interface SeededBenchmarkWidget extends Omit<BenchmarkWidget, 'workerIndex'> {
+    parts: BenchmarkPart[];
+}
+
 async function seedBenchmarkWidgets(
     prisma: ReturnType<typeof createTestPrismaClient>,
     profile: BenchmarkProfile,
     runId: string,
     tenantIds: string[],
-): Promise<Array<Omit<BenchmarkWidget, 'workerIndex'>>> {
-    const widgets: Array<Omit<BenchmarkWidget, 'workerIndex'>> = [];
+): Promise<SeededBenchmarkWidget[]> {
+    const widgets: SeededBenchmarkWidget[] = [];
 
     for (const [tenantIndex, tenantId] of tenantIds.entries()) {
         for (let offset = 0; offset < profile.widgetsPerTenant; offset += SEED_BATCH_SIZE) {
             const batchSize = Math.min(SEED_BATCH_SIZE, profile.widgetsPerTenant - offset);
-            const pendingCreates: Array<Promise<{ id: string; tenantId: string; name: string }>> = [];
+            const pendingCreates: Array<Promise<{
+                id: string;
+                tenantId: string;
+                name: string;
+                parts: BenchmarkPart[];
+            }>> = [];
             let preparationFailed = false;
             let preparationFailure: unknown;
 
@@ -256,6 +324,14 @@ async function seedBenchmarkWidgets(
                                 id: true,
                                 tenantId: true,
                                 name: true,
+                                parts: {
+                                    select: {
+                                        id: true,
+                                        tenantId: true,
+                                        label: true,
+                                        widgetId: true,
+                                    },
+                                },
                             },
                         }),
                     );
@@ -268,7 +344,12 @@ async function seedBenchmarkWidgets(
 
             const results = await Promise.allSettled(pendingCreates);
             const failures: unknown[] = preparationFailed ? [preparationFailure] : [];
-            const batch: Array<{ id: string; tenantId: string; name: string }> = [];
+            const batch: Array<{
+                id: string;
+                tenantId: string;
+                name: string;
+                parts: BenchmarkPart[];
+            }> = [];
 
             for (const result of results) {
                 if (result.status === 'rejected') {
@@ -291,6 +372,7 @@ async function seedBenchmarkWidgets(
                     id: widget.id,
                     tenantId: widget.tenantId,
                     initialName: widget.name,
+                    parts: widget.parts ?? [],
                 });
             }
         }

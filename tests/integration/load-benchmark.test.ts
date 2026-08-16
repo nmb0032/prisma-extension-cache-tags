@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { createTestPrismaClient } from '../fixture/client';
 import { BenchmarkMetrics } from '../load/benchmark-metrics';
 import { createBenchmarkFixture } from '../load/benchmark-fixture';
-import { runModelWorkload, warmBenchmarkCache } from '../load/model-workload';
+import { runColdSharedListQuery, runModelWorkload, warmBenchmarkCache } from '../load/model-workload';
 import type { BenchmarkProfile } from '../load/profiles';
 import { closeTestRedisClient, createTestRedisClient } from '../support/service-preflight';
 
@@ -139,13 +139,20 @@ describe('isolated model-backed benchmark fixture', () => {
             readRatio: 0.5,
         };
         const fixture = await createBenchmarkFixture(workloadProfile, metrics, { runId: `workload-${randomUUID()}` });
-        let randomCalls = 0;
-        const operationSamples = [0, 1, 0, 1];
 
         try {
+            const coldListProbe = await runColdSharedListQuery(fixture);
+            expect(coldListProbe.resultCount).toBe(2);
+            expect(coldListProbe.databaseQueries).toBe(1);
+
             await warmBenchmarkCache(fixture, workloadProfile);
             const firstPassHits = metrics.summarize(1).cacheHits;
             const firstPassQueries = fixture.queryCounters.reduce((total, counter) => total + counter.total, 0);
+            const firstPassPartQueries = fixture.queryCounters.reduce(
+                (total, counter) => total + (counter.byModel.Part ?? 0),
+                0,
+            );
+            expect(firstPassPartQueries).toBeGreaterThan(0);
 
             await warmBenchmarkCache(fixture, workloadProfile);
             const secondPassHits = metrics.summarize(1).cacheHits;
@@ -156,15 +163,13 @@ describe('isolated model-backed benchmark fixture', () => {
 
             await runModelWorkload(fixture, workloadProfile, metrics, {
                 now: () => 0,
-                random: () => {
-                    const callIndex = randomCalls++;
-                    if (callIndex % 2 === 1) {
-                        return 0;
-                    }
-
-                    return operationSamples[Math.floor(callIndex / 2)] ?? 0;
-                },
-                maxOperationsPerWorker: 2,
+                random: () => 0.25,
+                maxOperationsPerWorker: 1,
+            });
+            await runModelWorkload(fixture, { ...workloadProfile, readRatio: 0 }, metrics, {
+                now: () => 0,
+                random: () => 0,
+                maxOperationsPerWorker: 1,
             });
 
             const summary = metrics.summarize(1);

@@ -2,7 +2,7 @@ import { createClient } from 'redis';
 import { createNodeRedisAdapter } from '../../src/adapters/node-redis';
 import { createCacheTagsExtension } from '../../src/extension';
 import type { CacheTagsConfig } from '../../src/types';
-import { createTestPrismaClient } from '../fixture/client';
+import { createTestPrismaClient, type TestPrismaClientOptions } from '../fixture/client';
 
 export const REDIS_URL = process.env.TEST_REDIS_URL ?? 'redis://localhost:6380';
 
@@ -33,8 +33,9 @@ export function createCachedClient(
     redisClient: Awaited<ReturnType<typeof createRedis>>,
     counter: QueryCounter,
     config: CacheTagsConfig = {},
+    prismaOptions: TestPrismaClientOptions = {},
 ) {
-    const base = createTestPrismaClient();
+    const base = createTestPrismaClient(prismaOptions);
 
     const cached = base.$extends(
         createCacheTagsExtension(createNodeRedisAdapter(redisClient), {

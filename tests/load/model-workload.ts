@@ -1,22 +1,86 @@
 import type { BenchmarkMetrics } from './benchmark-metrics';
-import type { BenchmarkFixture, BenchmarkWidget } from './benchmark-fixture';
+import type { BenchmarkFixture, BenchmarkPart, BenchmarkReadCorpus, BenchmarkWidget } from './benchmark-fixture';
 import { selectOperation, type BenchmarkProfile } from './profiles';
 
 const CACHE_TTL_SECONDS = 300;
 const MINIMUM_WARMUP_PASSES = 2;
+const MAX_WARMUP_PASSES = 4;
+const MAX_WARMUP_ITEMS_PER_MODEL = 64;
+const MAX_WARMUP_LIST_TENANTS = 2;
+const LIST_READ_TAKE = 25;
+
+export const MAX_WARMUP_REQUESTS_PER_CLIENT =
+    MAX_WARMUP_ITEMS_PER_MODEL * 2 + MAX_WARMUP_LIST_TENANTS * 2;
+
+type ReadKind = 'widgetUnique' | 'partUnique' | 'widgetList' | 'partList';
+
+export interface ColdListProbeResult {
+    resultCount: number;
+    databaseQueries: number;
+}
 
 export async function warmBenchmarkCache(fixture: BenchmarkFixture, profile: BenchmarkProfile): Promise<void> {
+    if (!fixture.coldListProbeCompleted) {
+        await runColdSharedListQuery(fixture);
+    }
+
     const startedAt = Date.now();
     let completedPasses = 0;
+    const widgets = sampleItems(fixture.readCorpus.widgets, MAX_WARMUP_ITEMS_PER_MODEL);
+    const parts = sampleItems(fixture.readCorpus.parts, MAX_WARMUP_ITEMS_PER_MODEL);
+    const tenantIds = fixture.readCorpus.tenantIds.slice(0, MAX_WARMUP_LIST_TENANTS);
 
     do {
         await Promise.all(
-            fixture.widgetsByWorker.map((widgets, workerIndex) =>
-                warmWorkerShard(fixture.clients[workerIndex]!, widgets),
+            fixture.clients.map((client) =>
+                warmClient(client, widgets, parts, tenantIds),
             ),
         );
         completedPasses += 1;
-    } while (completedPasses < MINIMUM_WARMUP_PASSES || Date.now() - startedAt < profile.warmupMs);
+    } while (
+        completedPasses < MINIMUM_WARMUP_PASSES ||
+        (completedPasses < MAX_WARMUP_PASSES && Date.now() - startedAt < profile.warmupMs)
+    );
+}
+
+export async function runColdSharedListQuery(fixture: BenchmarkFixture): Promise<ColdListProbeResult> {
+    if (fixture.clients.length < 2) {
+        throw new Error('The benchmark requires at least two independent clients for the cold list probe');
+    }
+
+    const tenantId = fixture.readCorpus.tenantIds[0];
+    if (tenantId === undefined) {
+        throw new Error('The benchmark read corpus must contain at least one tenant');
+    }
+
+    const args = {
+        where: {
+            tenantId,
+            name: { startsWith: `benchmark:${fixture.runId}:tenant:0:widget:` },
+        },
+        orderBy: { id: 'asc' as const },
+        select: {
+            id: true,
+            tenantId: true,
+            name: true,
+        },
+        cache: { ttlSeconds: CACHE_TTL_SECONDS },
+    };
+    const beforeQueries = totalQueries(fixture);
+    const [first, second] = await Promise.all(
+        fixture.clients.slice(0, 2).map((client) => client.widget.findMany(args)),
+    );
+    const databaseQueries = totalQueries(fixture) - beforeQueries;
+
+    if (JSON.stringify(first) !== JSON.stringify(second)) {
+        throw new Error('Cold shared list probe returned different results across independent clients');
+    }
+    if (databaseQueries !== 1) {
+        throw new Error(`Cold shared list probe expected one database query, observed ${databaseQueries}`);
+    }
+
+    fixture.coldListProbeCompleted = true;
+    return { resultCount: first?.length ?? 0, databaseQueries };
 }
 
 export async function runModelWorkload(
@@ -25,6 +89,13 @@ export async function runModelWorkload(
     metrics: BenchmarkMetrics,
     options: { now?: () => number; random?: () => number; maxOperationsPerWorker?: number } = {},
 ): Promise<void> {
+    if (fixture.clients.length < 2) {
+        throw new Error('The benchmark requires at least two independent clients for cross-client freshness reads');
+    }
+    if (fixture.readCorpus.widgets.length === 0) {
+        throw new Error('The benchmark read corpus must contain at least one widget');
+    }
+
     const now = options.now ?? Date.now;
     const random = options.random ?? Math.random;
     const deadline = now() + profile.durationMs;
@@ -33,7 +104,9 @@ export async function runModelWorkload(
         fixture.clients.map((client, workerIndex) =>
             runWorker(
                 client,
+                fixture.clients[(workerIndex + 1) % fixture.clients.length]!,
                 fixture.widgetsByWorker[workerIndex]!,
+                fixture.readCorpus,
                 workerIndex,
                 profile,
                 metrics,
@@ -45,7 +118,7 @@ export async function runModelWorkload(
         ),
     );
 
-    metrics.addDatabaseQueries(fixture.queryCounters.reduce((total, counter) => total + counter.total, 0));
+    metrics.addDatabaseQueries(totalQueries(fixture));
 
     const failures = workerResults.flatMap((result) => (result.status === 'rejected' ? [result.reason] : []));
     if (failures.length === 1) {
@@ -56,20 +129,49 @@ export async function runModelWorkload(
     }
 }
 
-async function warmWorkerShard(client: BenchmarkFixture['clients'][number], widgets: BenchmarkWidget[]): Promise<void> {
-    await Promise.all(
-        widgets.map((widget) =>
+async function warmClient(
+    client: BenchmarkFixture['clients'][number],
+    widgets: BenchmarkWidget[],
+    parts: BenchmarkPart[],
+    tenantIds: string[],
+): Promise<void> {
+    await Promise.all([
+        ...widgets.map((widget) =>
             client.widget.findUnique({
                 where: { id: widget.id },
                 cache: { ttlSeconds: CACHE_TTL_SECONDS },
             }),
         ),
-    );
+        ...parts.map((part) =>
+            client.part.findUnique({
+                where: { id: part.id },
+                cache: { ttlSeconds: CACHE_TTL_SECONDS },
+            }),
+        ),
+        ...tenantIds.map((tenantId) =>
+            client.widget.findMany({
+                where: { tenantId },
+                orderBy: { id: 'asc' },
+                take: LIST_READ_TAKE,
+                cache: { ttlSeconds: CACHE_TTL_SECONDS },
+            }),
+        ),
+        ...tenantIds.map((tenantId) =>
+            client.part.findMany({
+                where: { tenantId },
+                orderBy: { id: 'asc' },
+                take: LIST_READ_TAKE,
+                cache: { ttlSeconds: CACHE_TTL_SECONDS },
+            }),
+        ),
+    ]);
 }
 
 async function runWorker(
     client: BenchmarkFixture['clients'][number],
-    widgets: BenchmarkWidget[],
+    readbackClient: BenchmarkFixture['clients'][number],
+    ownedWidgets: BenchmarkWidget[],
+    readCorpus: BenchmarkReadCorpus,
     workerIndex: number,
     profile: BenchmarkProfile,
     metrics: BenchmarkMetrics,
@@ -78,7 +180,7 @@ async function runWorker(
     random: () => number,
     maxOperationsPerWorker: number | undefined,
 ): Promise<void> {
-    if (widgets.length === 0) {
+    if (ownedWidgets.length === 0) {
         return;
     }
 
@@ -90,14 +192,11 @@ async function runWorker(
 
         try {
             const operation = selectOperation(random(), profile.readRatio);
-            const widget = widgets[Math.min(widgets.length - 1, Math.floor(random() * widgets.length))]!;
 
             if (operation === 'read') {
-                await client.widget.findUnique({
-                    where: { id: widget.id },
-                    cache: { ttlSeconds: CACHE_TTL_SECONDS },
-                });
+                await runReadOperation(readbackClient, readCorpus, random);
             } else {
+                const widget = ownedWidgets[selectIndex(random(), ownedWidgets.length)]!;
                 const expectedName = `benchmark:${workerIndex}:write:${writeCounter}`;
                 writeCounter += 1;
                 await client.widget.update({
@@ -105,7 +204,7 @@ async function runWorker(
                     data: { name: expectedName },
                 });
 
-                const observed = await client.widget.findUnique({
+                const observed = await readbackClient.widget.findUnique({
                     where: { id: widget.id },
                     cache: { ttlSeconds: CACHE_TTL_SECONDS },
                 });
@@ -125,4 +224,84 @@ async function runWorker(
             throw error;
         }
     }
+}
+
+async function runReadOperation(
+    client: BenchmarkFixture['clients'][number],
+    readCorpus: BenchmarkReadCorpus,
+    random: () => number,
+): Promise<void> {
+    const readKind = selectReadKind(random(), readCorpus.parts.length > 0);
+
+    switch (readKind) {
+        case 'widgetUnique': {
+            const widget = readCorpus.widgets[selectIndex(random(), readCorpus.widgets.length)]!;
+            await client.widget.findUnique({
+                where: { id: widget.id },
+                cache: { ttlSeconds: CACHE_TTL_SECONDS },
+            });
+            return;
+        }
+        case 'partUnique': {
+            const part = readCorpus.parts[selectIndex(random(), readCorpus.parts.length)]!;
+            await client.part.findUnique({
+                where: { id: part.id },
+                cache: { ttlSeconds: CACHE_TTL_SECONDS },
+            });
+            return;
+        }
+        case 'widgetList': {
+            const tenantId = readCorpus.tenantIds[selectIndex(random(), readCorpus.tenantIds.length)]!;
+            await client.widget.findMany({
+                where: { tenantId },
+                orderBy: { id: 'asc' },
+                take: LIST_READ_TAKE,
+                cache: { ttlSeconds: CACHE_TTL_SECONDS },
+            });
+            return;
+        }
+        case 'partList': {
+            const tenantId = readCorpus.tenantIds[selectIndex(random(), readCorpus.tenantIds.length)]!;
+            await client.part.findMany({
+                where: { tenantId },
+                orderBy: { id: 'asc' },
+                take: LIST_READ_TAKE,
+                cache: { ttlSeconds: CACHE_TTL_SECONDS },
+            });
+            return;
+        }
+    }
+}
+
+function selectReadKind(sample: number, hasParts: boolean): ReadKind {
+    const kinds: ReadKind[] = hasParts
+        ? ['widgetUnique', 'partUnique', 'widgetList', 'partList']
+        : ['widgetUnique', 'widgetList', 'partList'];
+    return kinds[Math.min(kinds.length - 1, selectIndex(sample, kinds.length))]!;
+}
+
+function selectIndex(sample: number, length: number): number {
+    if (length < 1) {
+        throw new Error('Cannot select from an empty benchmark corpus');
+    }
+    return Math.min(length - 1, Math.floor(sample * length));
+}
+
+function sampleItems<T>(items: readonly T[], limit: number): T[] {
+    if (items.length <= limit) {
+        return [...items];
+    }
+
+    const samples: T[] = [];
+    for (let index = 0; index < limit; index += 1) {
+        const item = items[Math.floor((index * items.length) / limit)];
+        if (item !== undefined) {
+            samples.push(item);
+        }
+    }
+    return samples;
+}
+
+function totalQueries(fixture: BenchmarkFixture): number {
+    return fixture.queryCounters.reduce((total, counter) => total + counter.total, 0);
 }

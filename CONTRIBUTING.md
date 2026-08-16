@@ -18,9 +18,20 @@ resolves the datasource URL with `env('TEST_DATABASE_URL')`.
 
 ## Verification
 
-`pnpm db:up` is required before running the integration or benchmark suites:
+`pnpm db:up` starts both PostgreSQL and Redis and is the simplest setup for the
+integration suite and the model-backed benchmark. The exact service
+requirements are:
+
+- `pnpm test:integration`: PostgreSQL and Redis.
+- `pnpm test:benchmark:invalidation`: Redis only, using a disposable database
+  because the synthetic benchmark calls `FLUSHDB`.
+- `pnpm test:benchmark:load`: PostgreSQL and Redis, with the fixture schema
+  prepared above.
+
+To run the integration and both benchmark commands with the local services:
 
 ```bash
+pnpm db:up
 pnpm test:integration
 pnpm test:benchmark:invalidation
 pnpm test:benchmark:load

@@ -8,10 +8,10 @@ import {
     TEST_REDIS_URL,
 } from '../support/service-preflight';
 
-const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgresql://cachetags:cachetags@localhost:5433/cachetags';
+export const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgresql://cachetags:cachetags@localhost:5433/cachetags';
 const POSTGRES_CONNECT_TIMEOUT_MS = 5_000;
 
-async function checkPostgresReachability(): Promise<void> {
+export async function checkPostgresReachability(): Promise<void> {
     const databaseUrl = new URL(TEST_DATABASE_URL);
     const port = Number(databaseUrl.port || 5432);
 
@@ -35,7 +35,7 @@ async function checkPostgresReachability(): Promise<void> {
     });
 }
 
-function ensureFixtureSchema(): void {
+export function ensureFixtureSchema(): void {
     try {
         execFileSync('pnpm', ['exec', 'prisma', 'generate'], {
             cwd: process.cwd(),

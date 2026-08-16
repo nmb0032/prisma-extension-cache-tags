@@ -2,8 +2,15 @@ import { createClient } from 'redis';
 import { createNodeRedisAdapter } from '../../src/adapters/node-redis';
 import { normalizeConfig } from '../../src/extension';
 import { bumpTagVersions } from '../../src/invalidation';
+import {
+    closeTestRedisClient,
+    createTestRedisClient,
+    formatServiceUnavailable,
+    logError,
+    TEST_REDIS_URL,
+} from '../support/service-preflight';
 
-const REDIS_URL = process.env.TEST_REDIS_URL ?? 'redis://localhost:6380';
+const REDIS_URL = TEST_REDIS_URL;
 const KEYSPACE_SIZES = [1_000, 10_000, 100_000];
 const INVALIDATIONS_PER_SIZE = 200;
 type RedisClient = ReturnType<typeof createClient<{}, {}, {}, 3, {}>>;
@@ -36,11 +43,17 @@ async function getIncrByCalls(client: RedisClient): Promise<number> {
 }
 
 async function main(): Promise<void> {
-    const client = createClient({ url: REDIS_URL });
+    const client = createTestRedisClient(REDIS_URL);
     let connected = false;
 
     try {
-        await client.connect();
+        try {
+            await client.connect();
+            await client.ping();
+        } catch (error) {
+            console.error(formatServiceUnavailable('Redis', REDIS_URL, 'TEST_REDIS_URL'));
+            throw error;
+        }
         connected = true;
 
         const config = normalizeConfig({ tenantKeys: ['tenantId'] });
@@ -103,11 +116,13 @@ async function main(): Promise<void> {
             } finally {
                 await client.quit();
             }
+        } else {
+            await closeTestRedisClient(client);
         }
     }
 }
 
 void main().catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : error);
+    logError(error);
     process.exitCode = 1;
 });

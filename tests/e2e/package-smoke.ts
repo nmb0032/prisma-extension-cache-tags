@@ -5,8 +5,12 @@ import { join } from 'node:path';
 
 const repoRoot = process.cwd();
 
-function run(command: string, args: string[], cwd: string): string {
-    return execFileSync(command, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] });
+function run(command: string, args: string[], cwd: string, showOutput = false): void {
+    execFileSync(command, args, {
+        cwd,
+        encoding: 'utf8',
+        stdio: showOutput ? 'inherit' : ['ignore', 'pipe', 'inherit'],
+    });
 }
 
 function main(): void {
@@ -18,7 +22,7 @@ function main(): void {
 
     try {
         console.log('Packing...');
-        run('npm', ['pack'], repoRoot);
+        run('npm', ['pack', '--loglevel=error'], repoRoot);
         tarball = readdirSync(repoRoot).find((file) => file.startsWith('prisma-extension-cache-tags-') && file.endsWith('.tgz'));
         if (!tarball) {
             throw new Error('npm pack produced no tarball');
@@ -69,10 +73,15 @@ function main(): void {
         );
 
         console.log('Checking package exports metadata with publint...');
-        run('npx', ['--yes', 'publint', join(repoRoot, tarball)], repoRoot);
+        run('npx', ['--yes', 'publint', join(repoRoot, tarball)], repoRoot, true);
 
         console.log('Checking type resolution with are-the-types-wrong...');
-        run('npx', ['--yes', '@arethetypeswrong/cli', join(repoRoot, tarball), '--pack', '--ignore-rules', 'cjs-resolves-to-esm'], repoRoot);
+        run(
+            'npx',
+            ['--yes', '@arethetypeswrong/cli', join(repoRoot, tarball), '--pack', '--ignore-rules', 'cjs-resolves-to-esm'],
+            repoRoot,
+            true,
+        );
     } finally {
         if (scratch) {
             rmSync(scratch, { recursive: true, force: true });

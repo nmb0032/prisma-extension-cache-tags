@@ -18,17 +18,23 @@ resolves the datasource URL with `env('TEST_DATABASE_URL')`.
 
 ## Verification
 
-Run the test groups with the package scripts:
+`pnpm db:up` is required before running the integration or load suites:
+
+```bash
+pnpm test:integration
+pnpm test:load
+```
+
+These commands do not require Docker or the local services:
 
 ```bash
 pnpm test:unit
-pnpm test:integration
-pnpm test:load
+pnpm build
+pnpm typecheck
 pnpm test:e2e
 ```
 
-Unit tests must not require Docker. Integration and end-to-end tests may use
-the services started by `pnpm db:up`; stop them with `pnpm db:down` when done.
+Stop the services with `pnpm db:down` when done.
 
 ## Commits
 

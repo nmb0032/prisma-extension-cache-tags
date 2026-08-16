@@ -93,6 +93,20 @@ describe('resolveCacheTags', () => {
         expect(resolved.tags).toEqual(['only:this']);
     });
 
+    test('explicit empty tags replace inferred tags when mergeTags is false', () => {
+        const config = makeConfig({ tenantKeys: ['tenantId'] });
+        const resolved = resolveCacheTags(
+            'Widget',
+            'findMany',
+            { where: { tenantId: 't1' } },
+            { tags: [], mergeTags: false },
+            config,
+            false,
+        );
+
+        expect(resolved.tags).toEqual([]);
+    });
+
     test('skips inference entirely when inferTags is false', () => {
         const config = makeConfig({ tenantKeys: ['tenantId'], inferTags: false });
         const resolved = resolveCacheTags('Widget', 'findMany', { where: { tenantId: 't1' } }, undefined, config, false);
@@ -107,6 +121,13 @@ describe('resolveCacheTags', () => {
         expect(resolved.tags).toContain('tenant:t1:model:Part');
     });
 
+    test('adds global dependency model tags when no tenant ids are inferred', () => {
+        const config = makeConfig({ dependencyTags: { Widget: ['Part'] } });
+        const resolved = resolveCacheTags('Widget', 'update', { where: { id: 'w1' } }, undefined, config, true);
+
+        expect(resolved.tags).toContain('global:model:Part');
+    });
+
     test('supports a dependency resolver function', () => {
         const config = makeConfig({
             tenantKeys: ['tenantId'],
@@ -117,6 +138,18 @@ describe('resolveCacheTags', () => {
         const resolved = resolveCacheTags('Widget', 'update', { where: { tenantId: 't1' } }, undefined, config, true);
 
         expect(resolved.tags).toContain('tenant:t1:custom');
+    });
+
+    test('resolves dependencies when inferTags is false', () => {
+        const config = makeConfig({
+            inferTags: false,
+            dependencyTags: {
+                Widget: () => ['dependency:Widget'],
+            },
+        });
+        const resolved = resolveCacheTags('Widget', 'update', { where: { id: 'w1' } }, undefined, config, true);
+
+        expect(resolved.tags).toContain('dependency:Widget');
     });
 
     test('ignores pagination and projection keys when collecting ids', () => {

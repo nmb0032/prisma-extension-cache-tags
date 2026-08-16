@@ -95,6 +95,10 @@ function resolveDependencyTags(
     }
 
     if (Array.isArray(resolver)) {
+        if (tenantIds.length === 0) {
+            return resolver.map((dependencyModel) => createModelTag(dependencyModel));
+        }
+
         return tenantIds.flatMap((tenantId) =>
             resolver.map((dependencyModel) => createModelTag(dependencyModel, tenantId)),
         );
@@ -134,13 +138,13 @@ export function resolveCacheTags(
                 inferredTags.push(createEntityTag(model, entityId));
             }
         }
-
-        if (includeDependencies) {
-            inferredTags.push(...resolveDependencyTags(model, operation, tenantIds, entityIds, args, config));
-        }
     }
 
-    const candidateTags = shouldMerge ? [...inferredTags, ...explicitTags] : explicitTags.length > 0 ? explicitTags : inferredTags;
+    if (includeDependencies) {
+        inferredTags.push(...resolveDependencyTags(model, operation, tenantIds, entityIds, args, config));
+    }
+
+    const candidateTags = shouldMerge ? [...inferredTags, ...explicitTags] : explicitTags;
 
     return {
         tags: normalizeTags(candidateTags, config.maxTagsPerQuery),

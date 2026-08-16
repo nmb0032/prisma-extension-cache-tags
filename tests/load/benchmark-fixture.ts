@@ -1,11 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { createTestPrismaClient } from '../fixture/client';
 import { createCachedClient, createQueryCounter, type QueryCounter } from '../integration/helpers';
-import { closeTestRedisClient, createTestRedisClient } from '../support/service-preflight';
+import { createTestRedisClient } from '../support/service-preflight';
 import type { BenchmarkMetrics } from './benchmark-metrics';
 import type { BenchmarkProfile } from './profiles';
 
 const SEED_BATCH_SIZE = 100;
+const BENCHMARK_KEY_PREFIX = 'prismaCacheTags:benchmark:';
+const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
+const REDIS_GLOB_METACHARACTERS = /[*?\[\]\\]/;
 
 export interface BenchmarkWidget {
     id: string;
@@ -26,10 +29,27 @@ export interface BenchmarkFixture {
     disconnect(): Promise<void>;
 }
 
-export async function deleteRedisNamespace(redis: ReturnType<typeof createTestRedisClient>, keyPrefix: string): Promise<void> {
-    if (keyPrefix.length === 0 || !keyPrefix.includes(':benchmark:')) {
+export function validateBenchmarkKeyPrefix(keyPrefix: string): void {
+    if (typeof keyPrefix !== 'string' || keyPrefix.length === 0) {
         throw new Error('keyPrefix must be a non-empty benchmark namespace');
     }
+
+    if (REDIS_GLOB_METACHARACTERS.test(keyPrefix)) {
+        throw new Error('keyPrefix must not contain Redis glob metacharacters');
+    }
+
+    if (!keyPrefix.startsWith(BENCHMARK_KEY_PREFIX)) {
+        throw new Error(`keyPrefix must match ${BENCHMARK_KEY_PREFIX}<safe run id>`);
+    }
+
+    const runId = keyPrefix.slice(BENCHMARK_KEY_PREFIX.length);
+    if (runId.length === 0 || SAFE_RUN_ID_PATTERN.exec(runId)?.[0] !== runId) {
+        throw new Error(`keyPrefix must match ${BENCHMARK_KEY_PREFIX}<safe run id>`);
+    }
+}
+
+export async function deleteRedisNamespace(redis: ReturnType<typeof createTestRedisClient>, keyPrefix: string): Promise<void> {
+    validateBenchmarkKeyPrefix(keyPrefix);
 
     let keys: string[] = [];
     for await (const page of redis.scanIterator({ MATCH: `${keyPrefix}:*`, COUNT: 100 })) {
@@ -57,9 +77,11 @@ export async function createBenchmarkFixture(
     }
 
     const runId = options.runId ?? randomUUID();
-    const keyPrefix = `prismaCacheTags:benchmark:${runId}`;
+    const keyPrefix = `${BENCHMARK_KEY_PREFIX}${runId}`;
+    validateBenchmarkKeyPrefix(keyPrefix);
     const tenantIds = Array.from({ length: profile.tenants }, (_, index) => `benchmark:${runId}:tenant:${index}`);
     const redis = createTestRedisClient();
+    const clients: ReturnType<typeof createCachedClient>[] = [];
     let seedClient: ReturnType<typeof createTestPrismaClient> | undefined;
 
     try {
@@ -67,14 +89,16 @@ export async function createBenchmarkFixture(
         seedClient = createTestPrismaClient();
         const seededWidgets = await seedBenchmarkWidgets(seedClient, profile, runId, tenantIds);
         const queryCounters = Array.from({ length: profile.concurrency }, () => createQueryCounter());
-        const clients = queryCounters.map((queryCounter) =>
-            createCachedClient(redis, queryCounter, {
-                keyPrefix,
-                metrics: metrics.cacheMetrics,
-                defaultTtlSeconds: 300,
-                maxTtlSeconds: 300,
-            }),
-        );
+        for (const queryCounter of queryCounters) {
+            clients.push(
+                createCachedClient(redis, queryCounter, {
+                    keyPrefix,
+                    metrics: metrics.cacheMetrics,
+                    defaultTtlSeconds: 300,
+                    maxTtlSeconds: 300,
+                }),
+            );
+        }
         const widgetsByWorker = Array.from({ length: profile.concurrency }, () => [] as BenchmarkWidget[]);
 
         for (const [index, widget] of seededWidgets.entries()) {
@@ -93,12 +117,14 @@ export async function createBenchmarkFixture(
                 return;
             }
 
-            cleanupPromise ??= (async () => {
-                await clients[0]!.widget.deleteMany({
-                    where: { tenantId: { in: tenantIds } },
-                });
-                await deleteRedisNamespace(redis, keyPrefix);
-            })();
+            cleanupPromise ??= cleanupBenchmarkResources(
+                async () => {
+                    await clients[0]!.widget.deleteMany({
+                        where: { tenantId: { in: tenantIds } },
+                    });
+                },
+                () => deleteRedisNamespace(redis, keyPrefix),
+            );
             await cleanupPromise;
         };
 
@@ -129,9 +155,70 @@ export async function createBenchmarkFixture(
             disconnect,
         };
     } catch (error) {
-        await Promise.allSettled([seedClient?.$disconnect(), closeTestRedisClient(redis)]);
-        throw error;
+        const cleanupFailures: unknown[] = [];
+        try {
+            await cleanupBenchmarkResources(
+                async () => {
+                    if (clients[0] !== undefined) {
+                        await clients[0].widget.deleteMany({
+                            where: { tenantId: { in: tenantIds } },
+                        });
+                    } else {
+                        await seedClient?.widget.deleteMany({
+                            where: { tenantId: { in: tenantIds } },
+                        });
+                    }
+                },
+                async () => {
+                    if (redis.isOpen) {
+                        await deleteRedisNamespace(redis, keyPrefix);
+                    }
+                },
+            );
+        } catch (cleanupError) {
+            cleanupFailures.push(...getFailureReasons(cleanupError));
+        }
+
+        const disconnectResults = await Promise.allSettled([
+            ...(seedClient ? [Promise.resolve().then(() => seedClient!.$disconnect())] : []),
+            ...clients.map((client) => Promise.resolve().then(() => client.$disconnect())),
+            ...(redis.isOpen ? [Promise.resolve().then(() => closeRedisClient(redis))] : []),
+        ]);
+        const failures = [
+            error,
+            ...cleanupFailures,
+            ...disconnectResults.flatMap((result) => (result.status === 'rejected' ? [result.reason] : [])),
+        ];
+        if (failures.length === 1) {
+            throw error;
+        }
+
+        throw new AggregateError(failures, 'Failed to create benchmark fixture');
     }
+}
+
+async function cleanupBenchmarkResources(deleteRows: () => Promise<void>, deleteRedis: () => Promise<void>): Promise<void> {
+    const failures: unknown[] = [];
+
+    try {
+        await deleteRows();
+    } catch (error) {
+        failures.push(error);
+    }
+
+    try {
+        await deleteRedis();
+    } catch (error) {
+        failures.push(error);
+    }
+
+    if (failures.length > 0) {
+        throw new AggregateError(failures, 'Failed to clean up benchmark fixture resources');
+    }
+}
+
+function getFailureReasons(error: unknown): unknown[] {
+    return error instanceof AggregateError ? error.errors : [error];
 }
 
 async function seedBenchmarkWidgets(

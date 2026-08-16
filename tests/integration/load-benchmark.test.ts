@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { createTestPrismaClient } from '../fixture/client';
 import { BenchmarkMetrics } from '../load/benchmark-metrics';
 import { createBenchmarkFixture } from '../load/benchmark-fixture';
 import type { BenchmarkProfile } from '../load/profiles';
@@ -43,6 +44,8 @@ describe('isolated model-backed benchmark fixture', () => {
 
             await fixture.redis.set(`${fixture.keyPrefix}:test`, 'remove');
             expect(await fixture.redis.get(`${fixture.keyPrefix}:test`)).toBe('remove');
+            const overlappingKey = `${fixture.keyPrefix}-other-run:test`;
+            await fixture.redis.set(overlappingKey, 'keep');
 
             await fixture.cleanup();
             cleaned = true;
@@ -65,6 +68,7 @@ describe('isolated model-backed benchmark fixture', () => {
             }
 
             expect(benchmarkKeys).toEqual([]);
+            expect(await fixture.redis.get(overlappingKey)).toBe('keep');
             expect(await unrelatedRedis.get(unrelatedKey)).toBe('keep');
         } finally {
             try {
@@ -74,6 +78,54 @@ describe('isolated model-backed benchmark fixture', () => {
             } finally {
                 await fixture.disconnect();
             }
+        }
+    });
+
+    test('cleans partial rows and keys when seeding fails', async () => {
+        const runId = `failed-${randomUUID()}`;
+        const keyPrefix = `prismaCacheTags:benchmark:${runId}`;
+        const tenantIds = [0, 1].map((index) => `benchmark:${runId}:tenant:${index}`);
+        const partialKey = `${keyPrefix}:partial`;
+        const prisma = createTestPrismaClient();
+        let widgetsPerTenantReads = 0;
+        const failingProfile: BenchmarkProfile = {
+            name: 'quick',
+            tenants: 2,
+            get widgetsPerTenant() {
+                widgetsPerTenantReads += 1;
+                if (widgetsPerTenantReads === 4) {
+                    throw new Error('forced seed failure');
+                }
+                return 2;
+            },
+            partsPerWidget: 1,
+            concurrency: 2,
+            warmupMs: 0,
+            durationMs: 1,
+            readRatio: 1,
+        };
+
+        await unrelatedRedis.set(partialKey, 'remove');
+
+        try {
+            await expect(createBenchmarkFixture(failingProfile, new BenchmarkMetrics(), { runId })).rejects.toThrow(
+                'forced seed failure',
+            );
+            expect(
+                await prisma.widget.count({
+                    where: { tenantId: { in: tenantIds } },
+                }),
+            ).toBe(0);
+            expect(
+                await prisma.part.count({
+                    where: { tenantId: { in: tenantIds } },
+                }),
+            ).toBe(0);
+            expect(await unrelatedRedis.get(partialKey)).toBeNull();
+            expect(await unrelatedRedis.get(unrelatedKey)).toBe('keep');
+        } finally {
+            await prisma.$disconnect();
+            await unrelatedRedis.del(partialKey);
         }
     });
 });

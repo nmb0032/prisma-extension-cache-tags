@@ -119,9 +119,9 @@ Date: 2026-08-16
 
 ### Finding
 
-`releaseCacheLock` could unconditionally call `delete(lock.key)` when the
-adapter did not provide `deleteIfValue`, allowing a caller to delete a lock
-owned by another caller.
+The pre-fix `releaseCacheLock` implementation unconditionally called
+`delete(lock.key)` when the adapter did not provide `deleteIfValue`, allowing a
+caller to delete a lock owned by another caller.
 
 ### Fix
 

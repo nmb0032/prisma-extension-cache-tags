@@ -4,7 +4,9 @@ import {
     getActiveInvalidationContext,
     publishInvalidation,
     runWithInvalidationContext,
+    withCacheInvalidation,
 } from '../../src/invalidation';
+import { normalizeConfig } from '../../src/config';
 import { getTagVersionKey } from '../../src/keys';
 import { noopLogger, noopMetrics } from '../../src/observability';
 import type { NormalizedCacheConfig } from '../../src/types';
@@ -23,6 +25,7 @@ const config: NormalizedCacheConfig = {
     dependencyTags: {},
     inferTags: true,
     tenantKeys: [],
+    tenantPrecision: false,
     entityKeys: ['id'],
     logger: noopLogger,
     metrics: noopMetrics,
@@ -76,6 +79,58 @@ describe('bumpTagVersions', () => {
 });
 
 describe('deferred invalidation context', () => {
+    test('normalizes omitted and partial wrapper configuration', async () => {
+        await withCacheInvalidation(
+            async () => {
+                await publishInvalidation(['default-config'], config, redis);
+            },
+            redis,
+        );
+
+        expect(redis.store.get(getTagVersionKey('default-config', normalizeConfig()))).toBe('1');
+
+        const partialConfig = { keyPrefix: 'custom-prefix', maxTtlSeconds: 60 };
+        const partialNormalized = normalizeConfig(partialConfig);
+        await withCacheInvalidation(
+            async () => {
+                await publishInvalidation(['partial-config'], config, redis);
+            },
+            redis,
+            partialConfig,
+        );
+
+        expect(redis.store.get(getTagVersionKey('partial-config', partialNormalized))).toBe('1');
+    });
+
+    test('logs deferred invalidation errors without rejecting the wrapper', async () => {
+        const error = vi.fn();
+        const wrapperConfig = normalizeConfig({
+            logger: {
+                debug: vi.fn(),
+                info: vi.fn(),
+                warn: vi.fn(),
+                error,
+            },
+        });
+        vi.spyOn(redis, 'increment').mockRejectedValueOnce(new Error('redis down'));
+
+        await expect(
+            withCacheInvalidation(
+                async () => {
+                    await publishInvalidation(['failing-tag'], config, redis);
+                    return 'completed';
+                },
+                redis,
+                wrapperConfig,
+            ),
+        ).resolves.toBe('completed');
+
+        expect(error).toHaveBeenCalledWith(
+            { tags: ['failing-tag'], error: 'redis down' },
+            'Deferred cache invalidation failed',
+        );
+    });
+
     test('buffers tags inside the context and flushes once on completion', async () => {
         const flushed: string[][] = [];
 

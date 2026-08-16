@@ -44,7 +44,8 @@ export async function releaseCacheLock(lock: CacheLock, redisAdapter: RedisAdapt
 
         await redisAdapter.deleteIfValue(lock.key, lock.token);
     } catch (error) {
-        config.logger.warn({ key: lock.key, error: (error as Error).message }, 'Failed to release cache lock');
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        config.logger.warn({ key: lock.key, error: errorMessage }, 'Failed to release cache lock');
     }
 }
 

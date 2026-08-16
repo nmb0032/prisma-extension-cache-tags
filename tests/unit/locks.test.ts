@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from 'vitest';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { getCacheLockKey } from '../../src/keys';
 import { acquireCacheLock, releaseCacheLock, waitForCachedValue } from '../../src/locks';
 import { noopLogger, noopMetrics } from '../../src/observability';
@@ -18,6 +18,7 @@ const config: NormalizedCacheConfig = {
     dependencyTags: {},
     inferTags: true,
     tenantKeys: [],
+    tenantPrecision: false,
     entityKeys: ['id'],
     logger: noopLogger,
     metrics: noopMetrics,
@@ -65,6 +66,25 @@ describe('cache locks', () => {
 
         expect(redis.store.get(lock!.key)).toBe(lock!.token);
         expect(redis.callCounts.delete ?? 0).toBe(0);
+    });
+
+    test('logs string lock-release rejections without throwing', async () => {
+        const warn = vi.fn();
+        const loggingConfig = {
+            ...config,
+            logger: {
+                debug: vi.fn(),
+                info: vi.fn(),
+                warn,
+                error: vi.fn(),
+            },
+        };
+        const lock = { key: 'lock-key', token: 'lock-token' };
+        vi.spyOn(redis, 'deleteIfValue').mockRejectedValueOnce('redis down');
+
+        await expect(releaseCacheLock(lock, redis, loggingConfig)).resolves.toBeUndefined();
+
+        expect(warn).toHaveBeenCalledWith({ key: 'lock-key', error: 'redis down' }, 'Failed to release cache lock');
     });
 
     test('returns null when the adapter cannot do conditional set', async () => {

@@ -1,4 +1,9 @@
 import { afterAll, beforeEach, describe, expect, test } from 'vitest';
+import { createNodeRedisAdapter } from '../../src/adapters/node-redis';
+import { normalizeConfig } from '../../src/config';
+import { generateCacheKey } from '../../src/keys';
+import { acquireCacheLock, releaseCacheLock } from '../../src/locks';
+import { resolveCacheTags } from '../../src/tags';
 import { createCachedClient, createQueryCounter, createRedis } from './helpers';
 
 const redis = await createRedis();
@@ -42,24 +47,30 @@ describe('distributed stampede protection', () => {
         expect(totalReads).toBe(1);
     });
 
-    test('a waiter that times out still returns correct data', async () => {
+    test('a waiter that times out runs its own database query and returns correct data', async () => {
         await podA.widget.create({ data: { tenantId: 't1', name: 'w1' } });
         counterA.reset();
         counterB.reset();
 
-        const [a, b] = await Promise.all([
-            podA.widget.findMany({
-                where: { tenantId: 't1' },
-                cache: { ttlSeconds: 60, stampede: { waitMs: 1, pollMs: 1 } },
-            }),
-            podB.widget.findMany({
-                where: { tenantId: 't1' },
-                cache: { ttlSeconds: 60, stampede: { waitMs: 1, pollMs: 1 } },
-            }),
-        ]);
+        const redisAdapter = createNodeRedisAdapter(redis);
+        const config = normalizeConfig({ tenantKeys: ['tenantId'] });
+        const args = { where: { tenantId: 't1' } };
+        const cacheOptions = { ttlSeconds: 60 };
+        const tags = resolveCacheTags('Widget', 'findMany', args, cacheOptions, config, false, true).tags;
+        const cacheKey = await generateCacheKey('Widget', 'findMany', args, tags, config, redisAdapter);
+        const ownerLock = await acquireCacheLock(cacheKey, { stampede: { waitMs: 10, pollMs: 1 } }, config, redisAdapter);
+        expect(ownerLock).not.toBeNull();
 
-        // Correctness must never depend on winning the lock race.
-        expect(a).toHaveLength(1);
-        expect(b).toHaveLength(1);
+        try {
+            const result = await podB.widget.findMany({
+                ...args,
+                cache: { ttlSeconds: 60, stampede: { waitMs: 10, pollMs: 1 } },
+            });
+
+            expect(result).toHaveLength(1);
+            expect(counterB.byModel.Widget).toBe(1);
+        } finally {
+            await releaseCacheLock(ownerLock!, redisAdapter, config);
+        }
     });
 });

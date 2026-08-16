@@ -176,7 +176,7 @@ export interface Metrics {
  * ```typescript
  * // Simple configuration
  * const prisma = new PrismaClient().$extends(
- *   createCachedPrismaExtension({
+ *   createCacheTagsExtension({
  *     defaultTtlSeconds: 60,
  *     maxTtlSeconds: 600,
  *     keyPrefix: 'myapp:cache:v1'

@@ -60,3 +60,35 @@
 - `pnpm lint` could not run because the repository's installed dependencies do not contain the `eslint` executable; no dependency was added.
 - Vitest emits the existing Vite CommonJS/ESM config warning; it does not affect test results.
 - Integration tests require the Docker Compose Postgres and Redis services.
+
+## Follow-up fix report
+
+### Finding addressed
+
+- Strengthened the committed interactive-transaction test to read the real `Widget`
+  model tag version through `getTagVersionKey` and `createNodeRedisAdapter`.
+- The tag version is asserted unchanged after each of the two writes inside the
+  open transaction, then asserted to increase by exactly one after commit.
+- Retained the existing post-transaction data correctness assertion.
+
+### Test files
+
+- `tests/integration/transactions.test.ts`
+
+### Validation commands and outputs
+
+- `COREPACK_ENABLE_PROJECT_SPEC=0 pnpm exec vitest run tests/integration/transactions.test.ts`
+  - Test Files 1 passed (1); Tests 3 passed (3).
+- `COREPACK_ENABLE_PROJECT_SPEC=0 pnpm test:integration`
+  - Test Files 5 passed (5); Tests 36 passed (36).
+- `COREPACK_ENABLE_PROJECT_SPEC=0 pnpm test:unit`
+  - Test Files 8 passed (8); Tests 64 passed (64).
+- `COREPACK_ENABLE_PROJECT_SPEC=0 pnpm typecheck`
+  - Passed with no errors.
+- `git diff --check`
+  - Passed.
+
+### Follow-up concerns
+
+- Vitest emits the existing Vite CommonJS/ESM config warning; it does not affect test results.
+- Integration tests require the Docker Compose Postgres and Redis services.

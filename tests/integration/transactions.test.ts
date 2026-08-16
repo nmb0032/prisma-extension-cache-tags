@@ -1,9 +1,14 @@
 import { afterAll, beforeEach, describe, expect, test } from 'vitest';
+import { normalizeConfig } from '../../src/config';
+import { createNodeRedisAdapter } from '../../src/adapters/node-redis';
+import { getTagVersionKey } from '../../src/keys';
 import { createCachedClient, createQueryCounter, createRedis } from './helpers';
 
 const redis = await createRedis();
 const counter = createQueryCounter();
 const prisma = createCachedClient(redis, counter);
+const redisAdapter = createNodeRedisAdapter(redis);
+const tagVersionKey = getTagVersionKey('tenant:t1:model:Widget', normalizeConfig({ tenantKeys: ['tenantId'] }));
 
 afterAll(async () => {
     try {
@@ -27,10 +32,18 @@ describe('transaction-aware invalidation', () => {
 
         await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
 
+        const tagVersionBeforeTransaction = (await redisAdapter.get<number>(tagVersionKey)) ?? 0;
+        expect(tagVersionBeforeTransaction).toBeGreaterThan(0);
+
         await prisma.$transaction(async (tx) => {
             await tx.widget.create({ data: { tenantId: 't1', name: 'w2' } });
+            expect(await redisAdapter.get<number>(tagVersionKey)).toBe(tagVersionBeforeTransaction);
+
             await tx.widget.create({ data: { tenantId: 't1', name: 'w3' } });
+            expect(await redisAdapter.get<number>(tagVersionKey)).toBe(tagVersionBeforeTransaction);
         });
+
+        expect(await redisAdapter.get<number>(tagVersionKey)).toBe(tagVersionBeforeTransaction + 1);
 
         const after = await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
         expect(after).toHaveLength(3);

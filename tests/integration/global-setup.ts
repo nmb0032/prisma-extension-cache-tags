@@ -1,6 +1,6 @@
-import { PrismaPg } from '@prisma/adapter-pg';
-import { PrismaClient } from '../fixture/generated/client';
-import { TEST_DATABASE_URL } from '../fixture/client';
+import { execFileSync } from 'node:child_process';
+import { createConnection } from 'node:net';
+import { URL } from 'node:url';
 import {
     checkRedisReachability,
     formatError,
@@ -8,19 +8,48 @@ import {
     TEST_REDIS_URL,
 } from '../support/service-preflight';
 
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL ?? 'postgresql://cachetags:cachetags@localhost:5433/cachetags';
 const POSTGRES_CONNECT_TIMEOUT_MS = 5_000;
 
 async function checkPostgresReachability(): Promise<void> {
-    const adapter = new PrismaPg({
-        connectionString: TEST_DATABASE_URL,
-        connectionTimeoutMillis: POSTGRES_CONNECT_TIMEOUT_MS,
-    });
-    const client = new PrismaClient({ adapter });
+    const databaseUrl = new URL(TEST_DATABASE_URL);
+    const port = Number(databaseUrl.port || 5432);
 
+    await new Promise<void>((resolve, reject) => {
+        const socket = createConnection({ host: databaseUrl.hostname, port });
+        const timeout = setTimeout(() => {
+            socket.destroy();
+            reject(new Error(`Connection timed out after ${POSTGRES_CONNECT_TIMEOUT_MS}ms`));
+        }, POSTGRES_CONNECT_TIMEOUT_MS);
+
+        socket.once('connect', () => {
+            clearTimeout(timeout);
+            socket.end();
+            resolve();
+        });
+        socket.once('error', (error: Error) => {
+            clearTimeout(timeout);
+            socket.destroy();
+            reject(error);
+        });
+    });
+}
+
+function ensureFixtureSchema(): void {
     try {
-        await client.$queryRaw`SELECT 1`;
-    } finally {
-        await client.$disconnect();
+        execFileSync('pnpm', ['exec', 'prisma', 'generate'], {
+            cwd: process.cwd(),
+            stdio: 'inherit',
+        });
+        execFileSync('pnpm', ['exec', 'prisma', 'db', 'push'], {
+            cwd: process.cwd(),
+            stdio: 'inherit',
+        });
+    } catch (error) {
+        throw new Error(
+            'Could not prepare the Prisma fixture schema.\nRun `pnpm exec prisma generate && pnpm exec prisma db push` to inspect the failure.',
+            { cause: error },
+        );
     }
 }
 
@@ -54,4 +83,6 @@ export async function setup(): Promise<void> {
     if (failures.length > 0) {
         throw new Error(failures.join('\n\n'));
     }
+
+    ensureFixtureSchema();
 }

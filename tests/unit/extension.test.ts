@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
-import { handleWrite, normalizeConfig, readThroughCache } from '../../src/extension';
+import { createCacheTagsExtension, handleWrite, normalizeConfig, readThroughCache } from '../../src/extension';
 import { getTagVersionKey } from '../../src/keys';
+import { acquireCacheLock, releaseCacheLock } from '../../src/locks';
 import { createFakeRedis, type FakeRedis } from './fake-redis';
 
 let redis: FakeRedis;
@@ -26,6 +27,27 @@ describe('normalizeConfig', () => {
         expect(config.stampede.waitMs).toBe(99);
         expect(config.stampede.pollMs).toBe(50);
         expect(config.stampede.lockTtlMs).toBe(5000);
+    });
+});
+
+describe('createCacheTagsExtension', () => {
+    test('strips cache args when caching is disabled globally', async () => {
+        let operationHandler!: (params: Record<string, unknown>) => Promise<unknown>;
+        const base = {
+            $extends: vi.fn((definition: { query: { $allOperations: typeof operationHandler } }) => {
+                operationHandler = definition.query.$allOperations;
+                return { $transaction: vi.fn() };
+            }),
+        };
+        const extension = createCacheTagsExtension(redis, { enabled: false });
+        const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);
+        const args = { where: { id: 'w1' }, cache: { ttlSeconds: 60 } };
+
+        extension(base as never);
+        const result = await operationHandler({ model: 'Widget', operation: 'findMany', args, query });
+
+        expect(result).toEqual([{ id: 'w1' }]);
+        expect(query).toHaveBeenCalledWith({ where: { id: 'w1' } });
     });
 });
 
@@ -71,6 +93,67 @@ describe('readThroughCache', () => {
         expect(query).toHaveBeenCalledTimes(1);
     });
 
+    test('releases the lock when the post-acquire recheck finds a cached value', async () => {
+        const onCacheEvent = vi.fn();
+        const config = normalizeConfig({ stampede: { waitMs: 10, pollMs: 1 }, metrics: { onCacheEvent } });
+        const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);
+        const params = {
+            model: 'Widget',
+            operation: 'findMany',
+            args: {},
+            cleanedArgs: {},
+            query,
+            cacheOptions: {},
+            config,
+            redisAdapter: redis,
+        };
+
+        await readThroughCache(params);
+        onCacheEvent.mockClear();
+        redis.resetCallCounts();
+        vi.spyOn(redis, 'get').mockImplementationOnce(async () => null);
+
+        const result = await readThroughCache(params);
+
+        expect(result).toEqual([{ id: 'w1' }]);
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(redis.callCounts.deleteIfValue).toBe(1);
+        expect(Array.from(redis.store.keys()).filter((key) => key.includes(':lock:'))).toHaveLength(0);
+        expect(onCacheEvent).toHaveBeenNthCalledWith(1, { model: 'Widget', operation: 'findMany', result: 'miss' });
+        expect(onCacheEvent).toHaveBeenNthCalledWith(2, { model: 'Widget', operation: 'findMany', result: 'hit' });
+    });
+
+    test('reports a hit when a waiter receives the cached value', async () => {
+        const onCacheEvent = vi.fn();
+        const config = normalizeConfig({ stampede: { waitMs: 20, pollMs: 1 }, metrics: { onCacheEvent } });
+        const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);
+        const params = {
+            model: 'Widget',
+            operation: 'findMany',
+            args: {},
+            cleanedArgs: {},
+            query,
+            cacheOptions: {},
+            config,
+            redisAdapter: redis,
+        };
+
+        await readThroughCache(params);
+        onCacheEvent.mockClear();
+        redis.resetCallCounts();
+        const cacheKey = Array.from(redis.store.keys()).find((key) => key.includes(':qry:'));
+        const ownerLock = await acquireCacheLock(cacheKey!, params.cacheOptions, config, redis);
+        vi.spyOn(redis, 'get').mockImplementationOnce(async () => null);
+
+        const result = await readThroughCache(params);
+        await releaseCacheLock(ownerLock!, redis, config);
+
+        expect(result).toEqual([{ id: 'w1' }]);
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(onCacheEvent).toHaveBeenNthCalledWith(1, { model: 'Widget', operation: 'findMany', result: 'miss' });
+        expect(onCacheEvent).toHaveBeenNthCalledWith(2, { model: 'Widget', operation: 'findMany', result: 'hit' });
+    });
+
     test('clamps the TTL to maxTtlSeconds', async () => {
         const config = normalizeConfig({ maxTtlSeconds: 10 });
         const set = vi.spyOn(redis, 'set');
@@ -109,6 +192,65 @@ describe('readThroughCache', () => {
         expect(query).toHaveBeenCalledTimes(1);
     });
 
+    test('falls back with cleaned args when tag version lookup throws', async () => {
+        const warn = vi.fn();
+        const onCacheEvent = vi.fn();
+        const config = normalizeConfig({
+            logger: {
+                debug: vi.fn(),
+                info: vi.fn(),
+                warn,
+                error: vi.fn(),
+            },
+            metrics: { onCacheEvent },
+        });
+        vi.spyOn(redis, 'mgetString').mockRejectedValueOnce(new Error('redis down'));
+        const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);
+        const cleanedArgs = { where: { id: 'w1' } };
+
+        const result = await readThroughCache({
+            model: 'Widget',
+            operation: 'findMany',
+            args: { ...cleanedArgs, cache: { ttlSeconds: 60 } },
+            cleanedArgs,
+            query,
+            cacheOptions: {},
+            config,
+            redisAdapter: redis,
+        });
+
+        expect(result).toEqual([{ id: 'w1' }]);
+        expect(query).toHaveBeenCalledWith(cleanedArgs);
+        expect(warn).toHaveBeenCalledWith(
+            expect.objectContaining({ error: 'redis down' }),
+            'Cache read failed; falling back to Prisma query',
+        );
+        expect(onCacheEvent).toHaveBeenCalledWith({ model: 'Widget', operation: 'findMany', result: 'miss' });
+    });
+
+    test('falls back when a custom-key tag version lookup throws', async () => {
+        const onCacheEvent = vi.fn();
+        const config = normalizeConfig({ metrics: { onCacheEvent } });
+        vi.spyOn(redis, 'mgetString').mockRejectedValueOnce(new Error('redis down'));
+        const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);
+        const cleanedArgs = { where: { id: 'w1' } };
+
+        const result = await readThroughCache({
+            model: 'Widget',
+            operation: 'findMany',
+            args: { ...cleanedArgs, cache: { key: 'widgets' } },
+            cleanedArgs,
+            query,
+            cacheOptions: { key: 'widgets' },
+            config,
+            redisAdapter: redis,
+        });
+
+        expect(result).toEqual([{ id: 'w1' }]);
+        expect(query).toHaveBeenCalledWith(cleanedArgs);
+        expect(onCacheEvent).toHaveBeenCalledWith({ model: 'Widget', operation: 'findMany', result: 'miss' });
+    });
+
     test('does not cache empty results when cacheEmpty is false', async () => {
         const config = normalizeConfig({ cacheEmpty: false });
 
@@ -145,6 +287,7 @@ describe('readThroughCache', () => {
 
         expect(onCacheEvent).toHaveBeenCalledWith({ model: 'Widget', operation: 'findMany', result: 'miss' });
         expect(onCacheEvent).toHaveBeenCalledWith({ model: 'Widget', operation: 'findMany', result: 'hit' });
+        expect(onCacheEvent).toHaveBeenCalledTimes(2);
     });
 });
 

@@ -108,9 +108,20 @@ export async function readThroughCache(params: {
     const { model, operation, args, cleanedArgs, query, cacheOptions, config, redisAdapter } = params;
     const ttlSeconds = normalizeTtl(cacheOptions, config);
     const resolvedTags = resolveCacheTags(model, operation, args, cacheOptions, config, false);
-    const cacheKey = cacheOptions.key
-        ? await generateCustomCacheKey(cacheOptions.key, resolvedTags.tags, config, redisAdapter)
-        : await generateCacheKey(model, operation, args, resolvedTags.tags, config, redisAdapter);
+    let cacheKey: string;
+
+    try {
+        cacheKey = cacheOptions.key
+            ? await generateCustomCacheKey(cacheOptions.key, resolvedTags.tags, config, redisAdapter)
+            : await generateCacheKey(model, operation, args, resolvedTags.tags, config, redisAdapter);
+    } catch (error) {
+        config.logger.warn(
+            { model, operation, error: (error as Error).message },
+            'Cache read failed; falling back to Prisma query',
+        );
+        config.metrics.onCacheEvent({ model, operation, result: 'miss' });
+        return query(cleanedArgs);
+    }
 
     const getCachedValue = () => tryGetCachedValue(cacheKey, model, operation, args, resolvedTags.tags, config, redisAdapter);
 
@@ -137,30 +148,32 @@ export async function readThroughCache(params: {
 
     let lock = null;
     let shouldPopulateCache = !redisAdapter.setIfNotExists;
-    if (redisAdapter.setIfNotExists) {
-        try {
-            lock = await acquireCacheLock(cacheKey, cacheOptions, config, redisAdapter);
-            if (!lock) {
-                const waitedValue = await waitForCachedValue(cacheKey, cacheOptions, config, redisAdapter, getCachedValue);
-                if (waitedValue !== undefined) {
-                    return waitedValue;
-                }
-            } else {
-                shouldPopulateCache = true;
-                const cachedAfterLock = await getCachedValue();
-                if (cachedAfterLock !== undefined) {
-                    return cachedAfterLock;
-                }
-            }
-        } catch (error) {
-            config.logger.warn(
-                { model, operation, cacheKey, error: (error as Error).message },
-                'Cache lock handling failed; falling back to Prisma query',
-            );
-        }
-    }
-
     try {
+        if (redisAdapter.setIfNotExists) {
+            try {
+                lock = await acquireCacheLock(cacheKey, cacheOptions, config, redisAdapter);
+                if (!lock) {
+                    const waitedValue = await waitForCachedValue(cacheKey, cacheOptions, config, redisAdapter, getCachedValue);
+                    if (waitedValue !== undefined) {
+                        config.metrics.onCacheEvent({ model, operation, result: 'hit' });
+                        return waitedValue;
+                    }
+                } else {
+                    shouldPopulateCache = true;
+                    const cachedAfterLock = await getCachedValue();
+                    if (cachedAfterLock !== undefined) {
+                        config.metrics.onCacheEvent({ model, operation, result: 'hit' });
+                        return cachedAfterLock;
+                    }
+                }
+            } catch (error) {
+                config.logger.warn(
+                    { model, operation, cacheKey, error: (error as Error).message },
+                    'Cache lock handling failed; falling back to Prisma query',
+                );
+            }
+        }
+
         const result = await query(cleanedArgs);
 
         if (shouldPopulateCache && shouldCacheResult(result, config)) {
@@ -238,7 +251,8 @@ export function createCacheTagsExtension(redisAdapter: RedisAdapter, config?: Ca
             query: {
                 async $allOperations({ model, operation, args, query }) {
                     if (!finalConfig.enabled || !model) {
-                        return query(args);
+                        const { cleanedArgs } = stripCacheFromArgs<CacheReadOptions | CacheWriteOptions>(args);
+                        return (query as (args: unknown) => Promise<unknown>)(cleanedArgs);
                     }
 
                     if (WRITE_OPERATIONS.includes(operation as WriteOperation)) {

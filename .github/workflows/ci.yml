@@ -71,8 +71,9 @@ jobs:
         run: pnpm add -D prisma@${{ matrix.prisma }} @prisma/client@${{ matrix.prisma }} @prisma/adapter-pg@${{ matrix.prisma }}
 
       - run: pnpm exec prisma generate
-      - run: pnpm exec prisma db push --skip-generate
+      - run: pnpm exec prisma db push
 
+      - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test:unit
       - run: pnpm test:integration

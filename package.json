@@ -105,6 +105,8 @@
         "@prisma/adapter-pg": "7.9.1",
         "@prisma/client": "7.9.1",
         "@types/node": "^24.7.2",
+        "@typescript-eslint/parser": "^8.67.0",
+        "eslint": "^9.39.5",
         "ioredis": "^6.0.0",
         "prisma": "7.9.1",
         "redis": "^6.2.1",

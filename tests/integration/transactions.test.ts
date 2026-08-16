@@ -1,0 +1,70 @@
+import { afterAll, beforeEach, describe, expect, test } from 'vitest';
+import { createCachedClient, createQueryCounter, createRedis } from './helpers';
+
+const redis = await createRedis();
+const counter = createQueryCounter();
+const prisma = createCachedClient(redis, counter);
+
+afterAll(async () => {
+    try {
+        await redis.flushDb();
+    } finally {
+        await Promise.allSettled([redis.quit(), prisma.$disconnect()]);
+    }
+});
+
+beforeEach(async () => {
+    await redis.flushDb();
+    await prisma.part.deleteMany();
+    await prisma.widget.deleteMany();
+    counter.reset();
+});
+
+describe('transaction-aware invalidation', () => {
+    test('a committed transaction invalidates once, after commit', async () => {
+        await prisma.widget.create({ data: { tenantId: 't1', name: 'w1' } });
+        counter.reset();
+
+        await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+
+        await prisma.$transaction(async (tx) => {
+            await tx.widget.create({ data: { tenantId: 't1', name: 'w2' } });
+            await tx.widget.create({ data: { tenantId: 't1', name: 'w3' } });
+        });
+
+        const after = await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+        expect(after).toHaveLength(3);
+    });
+
+    test('a rolled-back transaction does NOT invalidate the cache', async () => {
+        await prisma.widget.create({ data: { tenantId: 't1', name: 'w1' } });
+        counter.reset();
+
+        await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+        const readsAfterFirst = counter.byModel.Widget ?? 0;
+
+        await expect(
+            prisma.$transaction(async (tx) => {
+                await tx.widget.create({ data: { tenantId: 't1', name: 'doomed' } });
+                throw new Error('rollback');
+            }),
+        ).rejects.toThrow('rollback');
+
+        const after = await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+
+        // Cache still valid: the failed write must not have bumped any tag version.
+        expect(after).toHaveLength(1);
+        expect(counter.byModel.Widget).toBe(readsAfterFirst + 1); // +1 for the create attempt only
+    });
+
+    test('the database really did roll back', async () => {
+        await expect(
+            prisma.$transaction(async (tx) => {
+                await tx.widget.create({ data: { tenantId: 't1', name: 'doomed' } });
+                throw new Error('rollback');
+            }),
+        ).rejects.toThrow('rollback');
+
+        expect(await prisma.widget.count()).toBe(0);
+    });
+});

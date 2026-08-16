@@ -293,31 +293,42 @@ export function createCacheTagsExtension(redisAdapter: RedisAdapter, config?: Ca
             },
         });
 
-        const clientWithTransaction = extendedClient as typeof extendedClient & {
-            $transaction: typeof extendedClient.$transaction;
-        };
-        const originalTransaction = clientWithTransaction.$transaction.bind(clientWithTransaction);
+        const originalTransaction = extendedClient.$transaction;
+        const transactionHandler = (function (this: unknown, input: unknown, ...rest: unknown[]) {
+            const transactionContext = this ?? extendedClient;
+            const invokeOriginalTransaction = () =>
+                (originalTransaction as (...args: unknown[]) => Promise<unknown>).apply(transactionContext, [input, ...rest]);
 
-        clientWithTransaction.$transaction = ((input: unknown, ...rest: unknown[]) => {
             if (typeof input === 'function') {
-                return runWithInvalidationContext(
-                    () => originalTransaction(input as never, ...(rest as never[])) as Promise<unknown>,
-                    async (tags) => {
-                        try {
-                            await bumpTagVersions(tags, finalConfig, redisAdapter);
-                        } catch (error) {
-                            finalConfig.logger.error(
-                                { tags, error: (error as Error).message },
-                                'Cache invalidation failed after transaction commit',
-                            );
-                        }
-                    },
-                );
+                return runWithInvalidationContext(invokeOriginalTransaction, async (tags) => {
+                    try {
+                        await bumpTagVersions(tags, finalConfig, redisAdapter);
+                    } catch (error) {
+                        finalConfig.logger.error(
+                            { tags, error: (error as Error).message },
+                            'Cache invalidation failed after transaction commit',
+                        );
+                    }
+                });
             }
 
-            return originalTransaction(input as never, ...(rest as never[]));
+            return invokeOriginalTransaction();
         }) as typeof extendedClient.$transaction;
 
-        return clientWithTransaction;
+        if (typeof extendedClient.$extends !== 'function') {
+            const clientWithTransaction = extendedClient as typeof extendedClient & {
+                $transaction: typeof extendedClient.$transaction;
+            };
+            clientWithTransaction.$transaction = transactionHandler;
+            return clientWithTransaction;
+        }
+
+        const clientWithTransaction = extendedClient.$extends({
+            client: {
+                $transaction: transactionHandler,
+            },
+        });
+
+        return clientWithTransaction as typeof extendedClient;
     });
 }

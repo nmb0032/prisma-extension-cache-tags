@@ -48,7 +48,7 @@ export function createCachedClient(
     return cached.$extends({
         name: 'query-counter',
         query: {
-            async $allOperations({ model, args, query }) {
+            $allOperations({ model, args, query }) {
                 counter.total += 1;
                 if (model) {
                     counter.byModel[model] = (counter.byModel[model] ?? 0) + 1;

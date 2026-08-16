@@ -6,7 +6,8 @@ generation. No cache-key scan is needed.
 
 ## Generational cache keys
 
-Conceptually, the cache key is the hash of:
+For a read without `cache.key`, the generated cache key is conceptually the
+hash of:
 
 ```text
 { model, operation, args, schemaVersion, tags, tagVersions }
@@ -16,6 +17,12 @@ The extension normalizes the tags and reads their current versions before
 hashing the query identity. `tagVersions` come from an `MGET` of
 `<prefix>:tagver:<tag>` counters on every read. With no tags, the version list
 is empty and there are no counter keys to request.
+
+When `cache.key` is supplied, the extension uses the custom-key form
+`<prefix>:custom:<hash({ key, schemaVersion, tagVersions })>` instead. The
+custom key replaces the generated model/operation/argument identity in the
+Redis key, while the cached envelope still performs its full fingerprint check
+on read.
 
 For a read of `Widget.findMany`, the generated Redis key is shaped like
 `<prefix>:qry:Widget:findMany:<hash>`. The hash also includes the Prisma
@@ -33,7 +40,9 @@ There is no tag-to-key index to maintain or garbage-collect. Incrementing a
 counter makes every older generation unreachable immediately. Those orphaned
 keys still occupy memory until their own TTL expires; that is the deliberate
 trade-off that makes invalidation constant-time. Tag-version keys also receive
-a bounded expiry.
+an expiry of at least the configured maximum cache TTL (normally ten times that
+TTL, with a 3600-second minimum), so a version cannot disappear while an entry
+from that generation is still retained.
 
 ## Fingerprint verification
 
@@ -62,12 +71,12 @@ await prisma.$transaction(async (tx) => {
 });
 ```
 
-The extension intercepts the callback form of `$transaction` and places
-invalidation tags in an `AsyncLocalStorage` context. Writes inside the
+The extension intercepts both callback and array forms of `$transaction` and
+places invalidation tags in an `AsyncLocalStorage` context. Writes inside the
 transaction add tags to that context instead of incrementing Redis
 immediately. After the transaction commits, the unique tags are flushed once.
-If the callback throws and Prisma rolls back, the flush does not run, so the
-previous cache generation remains valid.
+If the callback or batch rejects and Prisma rolls back, the flush does not run,
+so the previous cache generation remains valid.
 
 `withCacheInvalidation(fn, redisAdapter, config?)` is the public wrapper for a
 code path that cannot use the extended client's intercepted transaction

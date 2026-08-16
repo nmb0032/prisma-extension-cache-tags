@@ -57,6 +57,21 @@ describe('resolveCacheTags', () => {
         );
     });
 
+    test('adds a global model fallback to tenant-scoped reads when requested', () => {
+        const config = makeConfig({ tenantKeys: ['tenantId'] });
+        const resolved = resolveCacheTags(
+            'Widget',
+            'findMany',
+            { where: { tenantId: 't1' } },
+            undefined,
+            config,
+            false,
+            true,
+        );
+
+        expect(resolved.tags).toContain('global:model:Widget');
+    });
+
     test('extracts tenant ids from a nested relation filter', () => {
         const config = makeConfig({ tenantKeys: ['tenant'] });
         const resolved = resolveCacheTags('Widget', 'findMany', { where: { tenant: { id: 't7' } } }, undefined, config, false);

@@ -28,7 +28,7 @@ export async function bumpTagVersions(tags: string[], config: NormalizedCacheCon
         return;
     }
 
-    const versionTtlSeconds = Math.min(config.maxTtlSeconds * 10, 3600);
+    const versionTtlSeconds = Math.max(config.maxTtlSeconds * 10, 3600);
     const uniqueTags = Array.from(new Set(tags));
 
     await Promise.all(

@@ -46,6 +46,12 @@ await prisma.widget.update({
 });
 ```
 
+When `tenantKeys` is configured, an ID-only update or delete uses the returned
+record to identify its tenant. If a write result genuinely omits every tenant
+key, the extension uses a model-wide fallback generation; tenant-scoped reads
+carry that fallback so correctness is preserved, at the cost of evicting all
+tenant caches for that model.
+
 ## How invalidation works
 
 On a cached read, the extension infers tenant, model, and entity tags from the Prisma arguments. Configure argument names with `tenantKeys` and `entityKeys`, or add explicit `cache.tags` when a query needs a broader or custom scope.

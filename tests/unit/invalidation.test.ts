@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from 'vitest';
+import { beforeEach, describe, expect, test, vi } from 'vitest';
 import {
     bumpTagVersions,
     getActiveInvalidationContext,
@@ -45,6 +45,16 @@ describe('bumpTagVersions', () => {
     test('dedupes repeated tags', async () => {
         await bumpTagVersions(['tenant:t1', 'tenant:t1'], config, redis);
         expect(redis.store.get(getTagVersionKey('tenant:t1', config))).toBe('1');
+    });
+
+    test('retains tag versions longer than a cache with a TTL above one hour', async () => {
+        const longTtlConfig = { ...config, maxTtlSeconds: 7_200 };
+        const expire = vi.spyOn(redis, 'expire');
+
+        await bumpTagVersions(['tenant:t1'], longTtlConfig, redis);
+
+        expect(expire).toHaveBeenCalledWith(getTagVersionKey('tenant:t1', longTtlConfig), 72_000);
+        expect(72_000).toBeGreaterThanOrEqual(longTtlConfig.maxTtlSeconds);
     });
 
     test('is a no-op for an empty tag list', async () => {

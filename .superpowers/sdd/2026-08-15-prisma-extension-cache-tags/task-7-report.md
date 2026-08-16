@@ -17,8 +17,9 @@ injected logger for both timeout and release-failure diagnostics.
   refused.
 - Added the required three-argument
   `releaseCacheLock(lock, redisAdapter, config)` contract. It uses optional
-  value-matched deletion when available, falls back to `delete` otherwise, and
-  reports release failures through `config.logger.warn`.
+  value-matched deletion when available; when that operation is unavailable it
+  leaves the lock in place rather than risking deletion of another owner's
+  lock, and reports release failures through `config.logger.warn`.
 - Added `waitForCachedValue`, preserving polling, per-query stampede overrides,
   the configured deadline, and timeout logging through `config.logger.debug`.
 - Removed the source module's KitCompass logger dependency and module-level

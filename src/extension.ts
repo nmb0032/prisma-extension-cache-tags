@@ -107,7 +107,7 @@ export async function readThroughCache(params: {
 }): Promise<unknown> {
     const { model, operation, args, cleanedArgs, query, cacheOptions, config, redisAdapter } = params;
     const ttlSeconds = normalizeTtl(cacheOptions, config);
-    const resolvedTags = resolveCacheTags(model, operation, args, cacheOptions, config, false);
+    const resolvedTags = resolveCacheTags(model, operation, args, cacheOptions, config, false, true);
     let cacheKey: string;
 
     try {
@@ -214,7 +214,16 @@ export async function handleWrite(params: {
 }): Promise<unknown> {
     const { model, operation, args, cleanedArgs, query, cacheOptions, config, redisAdapter } = params;
     const result = await query(cleanedArgs);
-    const resolvedTags = resolveCacheTags(model, operation, args, cacheOptions, config, true);
+    const resolvedTags = resolveCacheTags(model, operation, args, cacheOptions, config, true, false, [result]);
+
+    const shouldInfer = cacheOptions?.inferTags ?? config.inferTags;
+    const shouldMerge = cacheOptions?.mergeTags ?? true;
+    if (config.tenantKeys.length > 0 && shouldInfer && shouldMerge && resolvedTags.tenantIds.length === 0) {
+        config.logger.warn(
+            { model, operation },
+            'Tenant identity unavailable after write; invalidating the model-wide cache fallback',
+        );
+    }
 
     if (resolvedTags.tags.length === 0) {
         config.logger.warn({ model, operation }, 'Write completed but no cache invalidation tags were resolved');
@@ -299,20 +308,16 @@ export function createCacheTagsExtension(redisAdapter: RedisAdapter, config?: Ca
             const invokeOriginalTransaction = () =>
                 (originalTransaction as (...args: unknown[]) => Promise<unknown>).apply(transactionContext, [input, ...rest]);
 
-            if (typeof input === 'function') {
-                return runWithInvalidationContext(invokeOriginalTransaction, async (tags) => {
-                    try {
-                        await bumpTagVersions(tags, finalConfig, redisAdapter);
-                    } catch (error) {
-                        finalConfig.logger.error(
-                            { tags, error: (error as Error).message },
-                            'Cache invalidation failed after transaction commit',
-                        );
-                    }
-                });
-            }
-
-            return invokeOriginalTransaction();
+            return runWithInvalidationContext(invokeOriginalTransaction, async (tags) => {
+                try {
+                    await bumpTagVersions(tags, finalConfig, redisAdapter);
+                } catch (error) {
+                    finalConfig.logger.error(
+                        { tags, error: (error as Error).message },
+                        'Cache invalidation failed after transaction commit',
+                    );
+                }
+            });
         }) as typeof extendedClient.$transaction;
 
         if (typeof extendedClient.$extends !== 'function') {

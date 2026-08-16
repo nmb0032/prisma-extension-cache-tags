@@ -345,6 +345,86 @@ describe('handleWrite', () => {
         expect(readQuery).toHaveBeenCalledTimes(2);
     });
 
+    test('update and delete by ID use the returned tenant identity', async () => {
+        const config = normalizeConfig({ tenantKeys: ['tenantId'] });
+        const readQuery = vi.fn().mockResolvedValue([{ id: 'w1', tenantId: 't1', name: 'before' }]);
+        const readParams = {
+            model: 'Widget',
+            operation: 'findMany',
+            args: { where: { tenantId: 't1' } },
+            cleanedArgs: { where: { tenantId: 't1' } },
+            query: readQuery,
+            cacheOptions: { ttlSeconds: 60 },
+            config,
+            redisAdapter: redis,
+        };
+
+        await readThroughCache(readParams);
+
+        await handleWrite({
+            model: 'Widget',
+            operation: 'update',
+            args: { where: { id: 'w1' }, data: { name: 'after' } },
+            cleanedArgs: { where: { id: 'w1' }, data: { name: 'after' } },
+            query: vi.fn().mockResolvedValue({ id: 'w1', tenantId: 't1', name: 'after' }),
+            cacheOptions: undefined,
+            config,
+            redisAdapter: redis,
+        });
+
+        await readThroughCache(readParams);
+        expect(readQuery).toHaveBeenCalledTimes(2);
+
+        await readThroughCache(readParams);
+        readQuery.mockResolvedValue([]);
+
+        await handleWrite({
+            model: 'Widget',
+            operation: 'delete',
+            args: { where: { id: 'w1' } },
+            cleanedArgs: { where: { id: 'w1' } },
+            query: vi.fn().mockResolvedValue({ id: 'w1', tenantId: 't1', name: 'after' }),
+            cacheOptions: undefined,
+            config,
+            redisAdapter: redis,
+        });
+
+        const afterDelete = await readThroughCache(readParams);
+        expect(afterDelete).toEqual([]);
+        expect(readQuery).toHaveBeenCalledTimes(3);
+    });
+
+    test('uses a model-wide fallback when a write cannot determine the tenant', async () => {
+        const config = normalizeConfig({ tenantKeys: ['tenantId'] });
+        const readQuery = vi.fn().mockResolvedValue([{ id: 'w1', tenantId: 't1' }]);
+        const readParams = {
+            model: 'Widget',
+            operation: 'findMany',
+            args: { where: { tenantId: 't1' } },
+            cleanedArgs: { where: { tenantId: 't1' } },
+            query: readQuery,
+            cacheOptions: { ttlSeconds: 60 },
+            config,
+            redisAdapter: redis,
+        };
+
+        await readThroughCache(readParams);
+
+        await handleWrite({
+            model: 'Widget',
+            operation: 'update',
+            args: { where: { id: 'w1' }, data: { name: 'after' }, select: { id: true } },
+            cleanedArgs: { where: { id: 'w1' }, data: { name: 'after' }, select: { id: true } },
+            query: vi.fn().mockResolvedValue({ id: 'w1' }),
+            cacheOptions: undefined,
+            config,
+            redisAdapter: redis,
+        });
+
+        await readThroughCache(readParams);
+        expect(readQuery).toHaveBeenCalledTimes(2);
+    });
+
     test('a write to an unrelated tenant does not invalidate', async () => {
         const config = normalizeConfig({ tenantKeys: ['tenantId'] });
         const readQuery = vi.fn().mockResolvedValue([{ id: 'w1' }]);

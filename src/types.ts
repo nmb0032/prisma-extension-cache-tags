@@ -174,13 +174,25 @@ export interface Metrics {
  *
  * @example
  * ```typescript
- * // Simple configuration
- * const prisma = new PrismaClient().$extends(
- *   createCacheTagsExtension({
+ * import { PrismaPg } from '@prisma/adapter-pg';
+ * import { createClient } from 'redis';
+ * import { createCacheTagsExtension } from 'prisma-extension-cache-tags';
+ * import { createNodeRedisAdapter } from 'prisma-extension-cache-tags/node-redis';
+ * import { PrismaClient } from './generated/prisma/client';
+ *
+ * const redis = createClient({ url: process.env.REDIS_URL ?? 'redis://localhost:6379' });
+ * await redis.connect();
+ * const prismaAdapter = new PrismaPg({
+ *   connectionString: process.env.DATABASE_URL ?? 'postgresql://user:password@localhost:5432/app',
+ * });
+ *
+ * const prisma = new PrismaClient({ adapter: prismaAdapter }).$extends(
+ *   createCacheTagsExtension(createNodeRedisAdapter(redis), {
  *     defaultTtlSeconds: 60,
  *     maxTtlSeconds: 600,
- *     keyPrefix: 'myapp:cache:v1'
- *   })
+ *     keyPrefix: 'myapp:cache:v1',
+ *     tenantKeys: ['tenantId'],
+ *   }),
  * );
  *
  * // Use tags directly on writes and reads

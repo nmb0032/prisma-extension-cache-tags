@@ -114,14 +114,17 @@ export function resolveCacheTags(
     options: CacheReadOptions | CacheWriteOptions | undefined,
     config: NormalizedCacheConfig,
     includeDependencies: boolean,
+    includeGlobalModelFallback = false,
+    additionalSources: unknown[] = [],
 ): ResolvedCacheTags {
     const explicitTags = options?.tags ?? [];
     const shouldInfer = options?.inferTags ?? config.inferTags;
     const shouldMerge = options?.mergeTags ?? true;
     const tenantKeys = new Set(config.tenantKeys);
     const entityKeys = new Set(config.entityKeys);
-    const tenantIds = shouldInfer && tenantKeys.size > 0 ? Array.from(collectStringValues(args, tenantKeys)) : [];
-    const entityIds = shouldInfer ? Array.from(collectStringValues(args, entityKeys)) : [];
+    const sources = additionalSources.length > 0 ? [args, ...additionalSources] : args;
+    const tenantIds = shouldInfer && tenantKeys.size > 0 ? Array.from(collectStringValues(sources, tenantKeys)) : [];
+    const entityIds = shouldInfer ? Array.from(collectStringValues(sources, entityKeys)) : [];
     const inferredTags: string[] = [];
 
     if (shouldInfer) {
@@ -131,6 +134,9 @@ export function resolveCacheTags(
                 for (const entityId of entityIds) {
                     inferredTags.push(createEntityTag(model, entityId, tenantId));
                 }
+            }
+            if (includeGlobalModelFallback) {
+                inferredTags.push(createModelTag(model));
             }
         } else {
             inferredTags.push(createModelTag(model));

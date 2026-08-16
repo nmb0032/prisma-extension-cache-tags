@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from 'vitest';
+import { Prisma } from '../fixture/generated/client';
 import { normalizeConfig } from '../../src/config';
 import { createNodeRedisAdapter } from '../../src/adapters/node-redis';
 import { getTagVersionKey } from '../../src/keys';
@@ -9,6 +10,11 @@ const counter = createQueryCounter();
 const prisma = createCachedClient(redis, counter);
 const redisAdapter = createNodeRedisAdapter(redis);
 const tagVersionKey = getTagVersionKey('tenant:t1:model:Widget', normalizeConfig({ tenantKeys: ['tenantId'] }));
+
+function asTransactionBatch(operations: Promise<unknown>[]): Prisma.PrismaPromise<unknown>[] {
+    // Query extensions expose Promise at the type level, while Prisma executes these lazy values as a batch.
+    return operations as unknown as Prisma.PrismaPromise<unknown>[];
+}
 
 afterAll(async () => {
     try {
@@ -49,6 +55,25 @@ describe('transaction-aware invalidation', () => {
         expect(after).toHaveLength(3);
     });
 
+    test('a committed batch transaction flushes one invalidation after all writes', async () => {
+        await prisma.widget.create({ data: { tenantId: 't1', name: 'w1' } });
+        counter.reset();
+
+        await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+        const tagVersionBeforeTransaction = (await redisAdapter.get<number>(tagVersionKey)) ?? 0;
+
+        await prisma.$transaction(
+            asTransactionBatch([
+                prisma.widget.create({ data: { tenantId: 't1', name: 'w2' } }),
+                prisma.widget.create({ data: { tenantId: 't1', name: 'w3' } }),
+            ]),
+        );
+
+        expect(await redisAdapter.get<number>(tagVersionKey)).toBe(tagVersionBeforeTransaction + 1);
+        const after = await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+        expect(after).toHaveLength(3);
+    });
+
     test('a rolled-back transaction does NOT invalidate the cache', async () => {
         await prisma.widget.create({ data: { tenantId: 't1', name: 'w1' } });
         counter.reset();
@@ -68,6 +93,30 @@ describe('transaction-aware invalidation', () => {
         // Cache still valid: the failed write must not have bumped any tag version.
         expect(after).toHaveLength(1);
         expect(counter.byModel.Widget).toBe(readsAfterFirst + 1); // +1 for the create attempt only
+    });
+
+    test('a failed batch transaction does not flush invalidation', async () => {
+        await prisma.widget.create({ data: { tenantId: 't1', name: 'w1' } });
+        counter.reset();
+
+        await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+        const tagVersionBeforeTransaction = (await redisAdapter.get<number>(tagVersionKey)) ?? 0;
+
+        await expect(
+            prisma.$transaction(
+                asTransactionBatch([
+                    prisma.widget.create({ data: { tenantId: 't1', name: 'doomed' } }),
+                    prisma.widget.update({
+                        where: { id: 'missing-widget' },
+                        data: { name: 'still doomed' },
+                    }),
+                ]),
+            ),
+        ).rejects.toThrow();
+
+        expect(await redisAdapter.get<number>(tagVersionKey)).toBe(tagVersionBeforeTransaction);
+        const after = await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+        expect(after).toHaveLength(1);
     });
 
     test('the database really did roll back', async () => {

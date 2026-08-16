@@ -80,6 +80,33 @@ describe('read-through caching', () => {
         expect(counter.byModel.Widget).toBe(2);
     });
 
+    test('update and delete by ID invalidate the returned record tenant only', async () => {
+        const first = await prisma.widget.create({ data: { tenantId: 't1', name: 'w1' } });
+        await prisma.widget.create({ data: { tenantId: 't2', name: 'other' } });
+        counter.reset();
+
+        await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+        await prisma.widget.findMany({ where: { tenantId: 't2' }, cache: { ttlSeconds: 60 } });
+
+        await prisma.widget.update({
+            where: { id: first.id },
+            data: { name: 'renamed' },
+        });
+
+        const afterUpdate = await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+        const otherAfterUpdate = await prisma.widget.findMany({ where: { tenantId: 't2' }, cache: { ttlSeconds: 60 } });
+        expect(afterUpdate[0]?.name).toBe('renamed');
+        expect(otherAfterUpdate).toHaveLength(1);
+
+        await prisma.widget.delete({ where: { id: first.id } });
+
+        const afterDelete = await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+        const otherAfterDelete = await prisma.widget.findMany({ where: { tenantId: 't2' }, cache: { ttlSeconds: 60 } });
+        expect(afterDelete).toEqual([]);
+        expect(otherAfterDelete).toHaveLength(1);
+        expect(counter.byModel.Widget).toBe(6);
+    });
+
     test('dependency tags invalidate across models', async () => {
         const dependent = createCachedClient(redis, counter, { dependencyTags: { Part: ['Widget'] } });
         dependentClients.push(dependent);

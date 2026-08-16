@@ -9,7 +9,7 @@ The extension uses the defaults below when a field is omitted.
 | --- | --- | --- | --- |
 | `enabled` | `boolean` | `true` | Enables or disables the extension globally. When disabled, the extension strips `cache` from arguments and runs the Prisma operation normally. |
 | `defaultTtlSeconds` | `number` | `30` | TTL used by a cached read when `cache.ttlSeconds` is omitted. |
-| `maxTtlSeconds` | `number` | `300` | Upper bound applied to every requested read TTL. |
+| `maxTtlSeconds` | `number` | `300` | Upper bound applied to every requested read TTL; tag-version counters are retained for at least this long (normally 10x, with a 3600-second minimum). |
 | `keyPrefix` | `string` | `'prismaCacheTags:v1'` | Prefix for query keys, tag-version keys, and stampede-lock keys. |
 | `cacheNull` | `boolean` | `true` | Allows `null` read results to be cached. |
 | `cacheEmpty` | `boolean` | `true` | Allows empty-array read results to be cached. |
@@ -20,7 +20,7 @@ The extension uses the defaults below when a field is omitted.
 | `inferTags` | `boolean` | `true` | Enables automatic tenant, model, and entity tag inference. |
 | `tenantKeys` | `string[]` | `[]` | Prisma argument property names that identify tenants. With no tenant keys, inferred tags use the `global:` namespace. |
 | `entityKeys` | `string[]` | `['id']` | Prisma argument property names that identify individual records. |
-| `logger` | `Logger` | No-op logger | Receives structured debug, info, warning, and error events. |
+| `logger` | `Logger` | No-op logger | Receives structured debug, warning, and error events emitted by the extension. The `info` method is part of the interface but is not currently emitted by core operations. |
 | `metrics` | `Metrics` | No-op metrics sink | Receives cache hit and miss events through `onCacheEvent`. |
 
 ### Tenant keys
@@ -36,6 +36,17 @@ const config: CacheTagsConfig = {
     tenantKeys: ['organizationId', 'accountId'],
 };
 ```
+
+For writes, tenant values are inferred from the Prisma arguments and, when
+available, the successful returned record. This means an update or delete such
+as `where: { id: 'widget_1' }` can still invalidate the affected tenant when
+the returned row includes `organizationId`. If automatic inference cannot find
+a tenant value, the extension uses the related `global:model:<Model>` fallback
+tag. Tenant-scoped inferred reads carry that fallback tag, so the write remains
+correct but may evict every tenant's cache for that model. Include a tenant
+key in the write or provide explicit `cache.tags` to avoid that broad fallback.
+When `inferTags: false` or `mergeTags: false` is used, the caller is responsible
+for supplying the complete invalidation scope explicitly.
 
 ### Entity keys
 
@@ -105,8 +116,10 @@ const config: CacheTagsConfig = {
 
 ### Logger
 
-The logger receives `(data, message)` for each event. The default is a no-op,
-so logging is opt-in.
+The logger receives `(data, message)` for each event emitted by the extension.
+Core operations currently emit debug, warning, and error events; `info` is
+available on the interface for integrations but is not emitted by core
+operations. The default is a no-op, so logging is opt-in.
 
 ```ts
 import type { CacheTagsConfig } from 'prisma-extension-cache-tags';
@@ -164,7 +177,7 @@ Caching is opt-in: add a `cache` object to a supported read operation
 
 | Name | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `ttlSeconds` | `number` | `config.defaultTtlSeconds` | Requested cache TTL, clamped to `config.maxTtlSeconds`. |
+| `ttlSeconds` | `number` | `config.defaultTtlSeconds` | Requested cache TTL, clamped to `config.maxTtlSeconds` and never below one second. |
 | `key` | `string` | Generated key | Uses a stable custom key while still incorporating schema and tag generations. |
 | `enabled` | `boolean` | `true` when `cache` is present | Set to `false` to bypass the cache for one read. |
 | `debug` | `boolean` | `false` | Emits debug hit, miss, and population messages through `logger`. |

@@ -135,7 +135,7 @@ export async function createBenchmarkFixture(
                     ...clients.map((client) => Promise.resolve().then(() => client.$disconnect())),
                     Promise.resolve().then(() => closeRedisClient(redis)),
                 ]);
-                const failures = results.flatMap((result) => (result.status === 'rejected' ? [result.reason] : []));
+                const failures = results.flatMap((result) => (result.status === 'rejected' ? getFailureReasons(result.reason) : []));
                 if (failures.length > 0) {
                     throw new AggregateError(failures, 'Failed to disconnect benchmark fixture resources');
                 }
@@ -182,12 +182,12 @@ export async function createBenchmarkFixture(
         const disconnectResults = await Promise.allSettled([
             ...(seedClient ? [Promise.resolve().then(() => seedClient!.$disconnect())] : []),
             ...clients.map((client) => Promise.resolve().then(() => client.$disconnect())),
-            ...(redis.isOpen ? [Promise.resolve().then(() => closeRedisClient(redis))] : []),
+            Promise.resolve().then(() => closeRedisClient(redis)),
         ]);
         const failures = [
             error,
             ...cleanupFailures,
-            ...disconnectResults.flatMap((result) => (result.status === 'rejected' ? [result.reason] : [])),
+            ...disconnectResults.flatMap((result) => (result.status === 'rejected' ? getFailureReasons(result.reason) : [])),
         ];
         if (failures.length === 1) {
             throw error;
@@ -232,8 +232,12 @@ async function seedBenchmarkWidgets(
     for (const [tenantIndex, tenantId] of tenantIds.entries()) {
         for (let offset = 0; offset < profile.widgetsPerTenant; offset += SEED_BATCH_SIZE) {
             const batchSize = Math.min(SEED_BATCH_SIZE, profile.widgetsPerTenant - offset);
-            const batch = await Promise.all(
-                Array.from({ length: batchSize }, (_, batchIndex) => {
+            const pendingCreates: Array<Promise<{ id: string; tenantId: string; name: string }>> = [];
+            let preparationFailed = false;
+            let preparationFailure: unknown;
+
+            for (let batchIndex = 0; batchIndex < batchSize; batchIndex += 1) {
+                try {
                     const widgetIndex = offset + batchIndex;
                     const initialName = `benchmark:${runId}:tenant:${tenantIndex}:widget:${widgetIndex}`;
                     const parts = Array.from({ length: profile.partsPerWidget }, (_, partIndex) => ({
@@ -241,20 +245,46 @@ async function seedBenchmarkWidgets(
                         label: `${initialName}:part:${partIndex}`,
                     }));
 
-                    return prisma.widget.create({
-                        data: {
-                            tenantId,
-                            name: initialName,
-                            ...(parts.length > 0 ? { parts: { create: parts } } : {}),
-                        },
-                        select: {
-                            id: true,
-                            tenantId: true,
-                            name: true,
-                        },
-                    });
-                }),
-            );
+                    pendingCreates.push(
+                        prisma.widget.create({
+                            data: {
+                                tenantId,
+                                name: initialName,
+                                ...(parts.length > 0 ? { parts: { create: parts } } : {}),
+                            },
+                            select: {
+                                id: true,
+                                tenantId: true,
+                                name: true,
+                            },
+                        }),
+                    );
+                } catch (error) {
+                    preparationFailed = true;
+                    preparationFailure = error;
+                    break;
+                }
+            }
+
+            const results = await Promise.allSettled(pendingCreates);
+            const failures: unknown[] = preparationFailed ? [preparationFailure] : [];
+            const batch: Array<{ id: string; tenantId: string; name: string }> = [];
+
+            for (const result of results) {
+                if (result.status === 'rejected') {
+                    failures.push(result.reason);
+                } else {
+                    batch.push(result.value);
+                }
+            }
+
+            if (failures.length > 0) {
+                if (failures.length === 1) {
+                    throw failures[0];
+                }
+
+                throw new AggregateError(failures, 'Failed to seed benchmark widgets');
+            }
 
             for (const widget of batch) {
                 widgets.push({
@@ -270,7 +300,27 @@ async function seedBenchmarkWidgets(
 }
 
 async function closeRedisClient(redis: ReturnType<typeof createTestRedisClient>): Promise<void> {
+    const failures: unknown[] = [];
+    let shouldDestroy = !redis.isOpen;
+
     if (redis.isOpen) {
-        await redis.quit();
+        try {
+            await redis.quit();
+        } catch (error) {
+            failures.push(error);
+            shouldDestroy = true;
+        }
+    }
+
+    if (shouldDestroy) {
+        try {
+            redis.destroy();
+        } catch (error) {
+            failures.push(error);
+        }
+    }
+
+    if (failures.length > 0) {
+        throw new AggregateError(failures, 'Failed to close benchmark Redis client');
     }
 }

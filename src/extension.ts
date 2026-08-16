@@ -107,7 +107,7 @@ export async function readThroughCache(params: {
 }): Promise<unknown> {
     const { model, operation, args, cleanedArgs, query, cacheOptions, config, redisAdapter } = params;
     const ttlSeconds = normalizeTtl(cacheOptions, config);
-    const resolvedTags = resolveCacheTags(model, operation, args, cacheOptions, config, false, true);
+    const resolvedTags = resolveCacheTags(model, operation, args, cacheOptions, config, false);
     let cacheKey: string;
 
     try {
@@ -214,10 +214,7 @@ export async function handleWrite(params: {
 }): Promise<unknown> {
     const { model, operation, args, cleanedArgs, query, cacheOptions, config, redisAdapter } = params;
     const result = await query(cleanedArgs);
-    const resolvedTags = resolveCacheTags(model, operation, args, cacheOptions, config, true, false, [result]);
-
-    const shouldInfer = cacheOptions?.inferTags ?? config.inferTags;
-    const shouldMerge = cacheOptions?.mergeTags ?? true;
+    const resolvedTags = resolveCacheTags(model, operation, args, cacheOptions, config, true, [result]);
     if (config.tenantPrecision && config.tenantKeys.length > 0 && resolvedTags.tenantIds.length === 0) {
         config.logger.warn(
             { model, operation },

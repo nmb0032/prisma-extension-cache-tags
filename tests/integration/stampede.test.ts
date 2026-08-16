@@ -56,7 +56,7 @@ describe('distributed stampede protection', () => {
         const config = normalizeConfig({ tenantKeys: ['tenantId'] });
         const args = { where: { tenantId: 't1' } };
         const cacheOptions = { ttlSeconds: 60 };
-        const tags = resolveCacheTags('Widget', 'findMany', args, cacheOptions, config, false, true).tags;
+        const tags = resolveCacheTags('Widget', 'findMany', args, cacheOptions, config, false).tags;
         const cacheKey = await generateCacheKey('Widget', 'findMany', args, tags, config, redisAdapter);
         const ownerLock = await acquireCacheLock(cacheKey, { stampede: { waitMs: 10, pollMs: 1 } }, config, redisAdapter);
         expect(ownerLock).not.toBeNull();

@@ -128,7 +128,6 @@ export function resolveCacheTags(
     options: CacheReadOptions | CacheWriteOptions | undefined,
     config: NormalizedCacheConfig,
     includeDependencies: boolean,
-    includeGlobalModelFallback = false,
     additionalSources: unknown[] = [],
 ): ResolvedCacheTags {
     const explicitTags = options?.tags ?? [];
@@ -140,8 +139,7 @@ export function resolveCacheTags(
     const tenantIds = shouldInfer && tenantKeys.size > 0 ? Array.from(collectStringValues(sources, tenantKeys)) : [];
     const entityIds = shouldInfer ? Array.from(collectStringValues(sources, entityKeys)) : [];
     const inferredTags: string[] = [];
-    const isReadOperation =
-        includeGlobalModelFallback || READ_OPERATIONS.includes(operation as (typeof READ_OPERATIONS)[number]);
+    const isReadOperation = READ_OPERATIONS.includes(operation as (typeof READ_OPERATIONS)[number]);
 
     if (shouldInfer) {
         if (tenantIds.length > 0) {

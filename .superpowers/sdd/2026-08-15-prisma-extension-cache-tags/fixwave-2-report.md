@@ -384,3 +384,208 @@ keyspace-dependent invalidation cost.
 - Scope finding: the exact identity grep includes historical KitCompass
   references in the tracked implementation plan. Those references are not in
   published files and were intentionally left intact.
+
+## Follow-up cleanup wave
+
+Date: 2026-08-16T15:33:51Z
+
+### 1. Removed dead `handleWrite` locals
+
+Deleted the unused `shouldInfer` and `shouldMerge` declarations from
+`handleWrite`. They were not part of tag resolution or invalidation behavior.
+
+### 2. Enabled unused-symbol checking
+
+Added `noUnusedLocals: true` and `noUnusedParameters: true` to `tsconfig.json`.
+The intentional RED typecheck after adding the flags reported:
+
+```text
+> prisma-extension-cache-tags@0.0.0 typecheck /Users/nmb0032/Workspace/prisma-extension-cache-tags
+> tsc --noEmit
+
+src/extension.ts(219,11): error TS6133: 'shouldInfer' is declared but its value is never read.
+src/extension.ts(220,11): error TS6133: 'shouldMerge' is declared but its value is never read.
+src/locks.ts(56,5): error TS6133: 'redisAdapter' is declared but its value is never read.
+ ELIFECYCLE  Command failed with exit code 2.
+```
+
+The generated Prisma fixture directory was already excluded by the existing
+`tests/fixture/generated` entry, so no generated files were changed. The
+unused lock-wait parameter is retained for the existing internal signature and
+is now named `_redisAdapter`, which is exempt under TypeScript's unused
+parameter rule.
+
+### 3. Simplified `resolveCacheTags` fallback selection
+
+The `includeGlobalModelFallback` parameter was genuinely redundant. The only
+production calls were reads with `true` and writes with `false`, while
+`READ_OPERATIONS.includes(operation)` already distinguishes all supported reads
+from writes. The parameter and its extra call-site argument were removed; the
+local is now derived directly from `operation`. Existing read/write tag tests
+and the stampede integration setup were updated to the shorter signature.
+
+No behavior changed: reads still classify from `READ_OPERATIONS`, writes still
+classify as non-reads, and `additionalSources` remains the final optional
+argument for write result data. The focused tag suite passed before the full
+verification run.
+
+### Follow-up verification output
+
+#### `pnpm db:up`
+
+```text
+> prisma-extension-cache-tags@0.0.0 db:up /Users/nmb0032/Workspace/prisma-extension-cache-tags
+> docker compose up -d --wait
+
+ Container prisma-extension-cache-tags-redis-1 Running
+ Container prisma-extension-cache-tags-postgres-1 Running
+ Container prisma-extension-cache-tags-redis-1 Waiting
+ Container prisma-extension-cache-tags-postgres-1 Waiting
+ Container prisma-extension-cache-tags-redis-1 Healthy
+ Container prisma-extension-cache-tags-postgres-1 Healthy
+```
+
+#### Full requested verification chain
+
+```text
+> prisma-extension-cache-tags@0.0.0 test:unit /Users/nmb0032/Workspace/prisma-extension-cache-tags
+> vitest run --dir tests/unit
+
+
+ RUN  v4.1.10 /Users/nmb0032/Workspace/prisma-extension-cache-tags
+
+
+ Test Files  8 passed (8)
+      Tests  81 passed (81)
+   Start at  11:33:31
+   Duration  1.26s (transform 81ms, setup 0ms, import 238ms, tests 356ms, environment 0ms)
+
+
+> prisma-extension-cache-tags@0.0.0 test:integration /Users/nmb0032/Workspace/prisma-extension-cache-tags
+> vitest run --dir tests/integration
+
+
+ RUN  v4.1.10 /Users/nmb0032/Workspace/prisma-extension-cache-tags
+
+
+ Test Files  5 passed (5)
+      Tests  40 passed (40)
+   Start at  11:33:33
+   Duration  3.20s (transform 83ms, setup 0ms, import 794ms, tests 1.99s, environment 0ms)
+
+
+> prisma-extension-cache-tags@0.0.0 test:load /Users/nmb0032/Workspace/prisma-extension-cache-tags
+> tsx tests/load/invalidation-scaling.ts
+
+┌─────────┬─────────────┬─────────────────────┬─────────────────────┐
+│ (index) │ cached keys │ invalidate p50 (ms) │ invalidate p99 (ms) │
+├─────────┼─────────────┼─────────────────────┼─────────────────────┤
+│ 0       │ '1,000'     │ '0.347'             │ '0.927'             │
+│ 1       │ '10,000'    │ '0.321'             │ '0.395'             │
+│ 2       │ '100,000'   │ '0.331'             │ '0.646'             │
+└─────────┴─────────────┴─────────────────────┴─────────────────────┘
+Observed Redis INCRBY calls per keyspace: 200, 200, 200.
+
+Keyspace grew 100x; p50 invalidation latency grew 0.96x.
+PASS: invalidation cost is independent of keyspace size.
+
+
+> prisma-extension-cache-tags@0.0.0 build /Users/nmb0032/Workspace/prisma-extension-cache-tags
+> tsup
+
+CLI Building entry: {"index":"src/index.ts","adapters/node-redis":"src/adapters/node-redis.ts","adapters/ioredis":"src/adapters/ioredis.ts"}
+CLI Using tsconfig: tsconfig.json
+CLI tsup v8.5.1
+CLI Using tsup config: /Users/nmb0032/Workspace/prisma-extension-cache-tags/tsup.config.ts
+CLI Target: node20
+CLI Cleaning output folder
+CJS Build start
+ESM Build start
+CJS dist/index.js                   22.80 KB
+CJS dist/adapters/ioredis.js        2.26 KB
+CJS dist/adapters/node-redis.js     2.26 KB
+CJS dist/index.js.map               58.21 KB
+CJS dist/adapters/node-redis.js.map 3.36 KB
+CJS dist/adapters/ioredis.js.map    3.47 KB
+CJS ⚡️ Build success in 14ms
+ESM dist/index.mjs                   20.80 KB
+ESM dist/adapters/node-redis.mjs     1.24 KB
+ESM dist/adapters/ioredis.mjs        1.25 KB
+ESM dist/index.mjs.map               57.66 KB
+ESM dist/adapters/node-redis.mjs.map 3.32 KB
+ESM dist/adapters/ioredis.mjs.map    3.42 KB
+ESM ⚡️ Build success in 13ms
+DTS Build start
+DTS ⚡️ Build success in 841ms
+DTS dist/adapters/ioredis.d.ts     964.00 B
+DTS dist/adapters/node-redis.d.ts  927.00 B
+DTS dist/index.d.ts                1.56 KB
+DTS dist/types-q0HjCq5I.d.ts       12.17 KB
+DTS dist/adapters/ioredis.d.mts    965.00 B
+DTS dist/adapters/node-redis.d.mts 928.00 B
+DTS dist/index.d.mts               1.56 KB
+DTS dist/types-q0HjCq5I.d.mts      12.17 KB
+
+
+> prisma-extension-cache-tags@0.0.0 typecheck /Users/nmb0032/Workspace/prisma-extension-cache-tags
+> tsc --noEmit
+
+
+> prisma-extension-cache-tags@0.0.0 test:e2e /Users/nmb0032/Workspace/prisma-extension-cache-tags
+> tsx tests/e2e/package-smoke.ts
+
+Building...
+Packing...
+npm notice
+npm notice 📦  prisma-extension-cache-tags@0.0.0
+npm notice Tarball Contents
+npm notice 1.1kB LICENSE
+npm notice 4.8kB README.md
+npm notice 965B dist/adapters/ioredis.d.mts
+npm notice 964B dist/adapters/ioredis.d.ts
+npm notice 2.3kB dist/adapters/ioredis.js
+npm notice 3.6kB dist/adapters/ioredis.js.map
+npm notice 1.3kB dist/adapters/ioredis.mjs
+npm notice 3.5kB dist/adapters/ioredis.mjs.map
+npm notice 928B dist/adapters/node-redis.d.mts
+npm notice 927B dist/adapters/node-redis.d.ts
+npm notice 2.3kB dist/adapters/node-redis.js
+npm notice 3.4kB dist/adapters/node-redis.js.map
+npm notice 1.3kB dist/adapters/node-redis.mjs
+npm notice 3.4kB dist/adapters/node-redis.mjs.map
+npm notice 1.6kB dist/index.d.mts
+npm notice 1.6kB dist/index.d.ts
+npm notice 23.4kB dist/index.js
+npm notice 59.6kB dist/index.js.map
+npm notice 21.3kB dist/index.mjs
+npm notice 59.0kB dist/index.mjs.map
+npm notice 12.5kB dist/types-q0HjCq5I.d.mts
+npm notice 12.5kB dist/types-q0HjCq5I.d.ts
+npm notice 3.9kB package.json
+npm notice Tarball Details
+npm notice name: prisma-extension-cache-tags
+npm notice version: 0.0.0
+npm notice filename: prisma-extension-cache-tags-0.0.0.tgz
+npm notice package size: 46.5 kB
+npm notice unpacked size: 226.1 kB
+npm notice shasum: 7d3682b96f2119ab0239705e81c93c01080457f4
+npm notice integrity: sha512-GBc2o1zhIvPyH[...]5bFoFeID/CKBw==
+npm notice total files: 23
+npm notice
+Installing into /var/folders/8w/ypsj3w1x2nq058z1rj053s_m0000gn/T/cache-tags-e2e-iC0XRT...
+Verifying CommonJS require()...
+Verifying ESM dynamic import()...
+Verifying adapter subpath exports...
+Checking package exports metadata with publint...
+Checking type resolution with are-the-types-right...
+
+PASS: package installs and resolves under both CJS and ESM.
+```
+
+The full chain exited successfully. Unit output remained warning-free. The
+additional final lint and whitespace check also passed:
+
+```text
+> prisma-extension-cache-tags@0.0.0 lint /Users/nmb0032/Workspace/prisma-extension-cache-tags
+> eslint .
+```

@@ -53,7 +53,7 @@ export async function waitForCachedValue<T>(
     cacheKey: string,
     options: CacheReadOptions | undefined,
     config: NormalizedCacheConfig,
-    redisAdapter: RedisAdapter,
+    _redisAdapter: RedisAdapter,
     getCachedValue: () => Promise<T | undefined>,
 ): Promise<T | undefined> {
     const { waitMs, pollMs } = resolveStampedeOptions(options, config);

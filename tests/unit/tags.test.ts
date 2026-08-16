@@ -48,7 +48,7 @@ describe('resolveCacheTags', () => {
         const config = makeConfig({ tenantKeys: ['tenantId'] });
 
         test('overlaps a tenant-less read with a tenant-ful write', () => {
-            const read = resolveCacheTags('Widget', 'findMany', {}, undefined, config, false, true);
+            const read = resolveCacheTags('Widget', 'findMany', {}, undefined, config, false);
             const write = resolveCacheTags('Widget', 'create', { data: { tenantId: 't1', id: 'w1' } }, undefined, config, true);
 
             expect(overlappingTags(read.tags, write.tags).length).toBeGreaterThan(0);
@@ -62,7 +62,6 @@ describe('resolveCacheTags', () => {
                 undefined,
                 config,
                 false,
-                true,
             );
             const write = resolveCacheTags('Widget', 'update', { where: { id: 'w1' } }, undefined, config, true);
 
@@ -77,7 +76,6 @@ describe('resolveCacheTags', () => {
                 undefined,
                 config,
                 false,
-                true,
             );
             const write = resolveCacheTags(
                 'Widget',
@@ -92,7 +90,7 @@ describe('resolveCacheTags', () => {
         });
 
         test('overlaps a tenant-less read with a tenant-less write', () => {
-            const read = resolveCacheTags('Widget', 'findMany', {}, undefined, config, false, true);
+            const read = resolveCacheTags('Widget', 'findMany', {}, undefined, config, false);
             const write = resolveCacheTags('Widget', 'updateMany', { where: { active: true } }, undefined, config, true);
 
             expect(overlappingTags(read.tags, write.tags).length).toBeGreaterThan(0);
@@ -107,7 +105,6 @@ describe('resolveCacheTags', () => {
                 undefined,
                 cappedConfig,
                 false,
-                true,
             );
             const write = resolveCacheTags(
                 'Widget',
@@ -179,7 +176,7 @@ describe('resolveCacheTags', () => {
         );
     });
 
-    test('adds a global model fallback to tenant-scoped reads when requested', () => {
+    test('adds a global model fallback to tenant-scoped reads', () => {
         const config = makeConfig({ tenantKeys: ['tenantId'] });
         const resolved = resolveCacheTags(
             'Widget',
@@ -188,7 +185,6 @@ describe('resolveCacheTags', () => {
             undefined,
             config,
             false,
-            true,
         );
 
         expect(resolved.tags).toContain('global:model:Widget');

@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { createTestPrismaClient } from '../fixture/client';
 import { BenchmarkMetrics } from '../load/benchmark-metrics';
 import { createBenchmarkFixture } from '../load/benchmark-fixture';
+import { runModelWorkload, warmBenchmarkCache } from '../load/model-workload';
 import type { BenchmarkProfile } from '../load/profiles';
 import { closeTestRedisClient, createTestRedisClient } from '../support/service-preflight';
 
@@ -126,6 +127,59 @@ describe('isolated model-backed benchmark fixture', () => {
         } finally {
             await prisma.$disconnect();
             await unrelatedRedis.del(partialKey);
+        }
+    });
+
+    test('warms cached reads and runs a fresh concurrent read/write workload', async () => {
+        const metrics = new BenchmarkMetrics();
+        const workloadProfile: BenchmarkProfile = {
+            ...profile,
+            warmupMs: 0,
+            durationMs: 1,
+            readRatio: 0.5,
+        };
+        const fixture = await createBenchmarkFixture(workloadProfile, metrics, { runId: `workload-${randomUUID()}` });
+        let randomCalls = 0;
+        const operationSamples = [0, 1, 0, 1];
+
+        try {
+            await warmBenchmarkCache(fixture, workloadProfile);
+            const firstPassHits = metrics.summarize(1).cacheHits;
+            const firstPassQueries = fixture.queryCounters.reduce((total, counter) => total + counter.total, 0);
+
+            await warmBenchmarkCache(fixture, workloadProfile);
+            const secondPassHits = metrics.summarize(1).cacheHits;
+            const secondPassQueries = fixture.queryCounters.reduce((total, counter) => total + counter.total, 0);
+
+            expect(secondPassHits).toBeGreaterThan(firstPassHits);
+            expect(secondPassQueries).toBe(firstPassQueries);
+
+            await runModelWorkload(fixture, workloadProfile, metrics, {
+                now: () => 0,
+                random: () => {
+                    const callIndex = randomCalls++;
+                    if (callIndex % 2 === 1) {
+                        return 0;
+                    }
+
+                    return operationSamples[Math.floor(callIndex / 2)] ?? 0;
+                },
+                maxOperationsPerWorker: 2,
+            });
+
+            const summary = metrics.summarize(1);
+            expect(summary.errors).toBe(0);
+            expect(summary.freshnessFailures).toBe(0);
+            expect(summary.cacheHits).toBeGreaterThan(0);
+            expect(summary.databaseQueries).toBeGreaterThan(0);
+            expect(summary.reads).toBeGreaterThan(0);
+            expect(summary.writes).toBeGreaterThan(0);
+        } finally {
+            try {
+                await fixture.cleanup();
+            } finally {
+                await fixture.disconnect();
+            }
         }
     });
 });

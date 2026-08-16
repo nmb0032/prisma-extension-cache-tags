@@ -17,11 +17,16 @@ function makeConfig(overrides: Partial<NormalizedCacheConfig> = {}): NormalizedC
         dependencyTags: {},
         inferTags: true,
         tenantKeys: [],
+        tenantPrecision: false,
         entityKeys: ['id'],
         logger: noopLogger,
         metrics: noopMetrics,
         ...overrides,
     };
+}
+
+function overlappingTags(left: string[], right: string[]): string[] {
+    return left.filter((tag) => right.includes(tag));
 }
 
 describe('normalizeTags', () => {
@@ -39,6 +44,123 @@ describe('normalizeTags', () => {
 });
 
 describe('resolveCacheTags', () => {
+    describe('safe default tag overlap', () => {
+        const config = makeConfig({ tenantKeys: ['tenantId'] });
+
+        test('overlaps a tenant-less read with a tenant-ful write', () => {
+            const read = resolveCacheTags('Widget', 'findMany', {}, undefined, config, false, true);
+            const write = resolveCacheTags('Widget', 'create', { data: { tenantId: 't1', id: 'w1' } }, undefined, config, true);
+
+            expect(overlappingTags(read.tags, write.tags).length).toBeGreaterThan(0);
+        });
+
+        test('overlaps a tenant-ful read with a tenant-less write', () => {
+            const read = resolveCacheTags(
+                'Widget',
+                'findMany',
+                { where: { tenantId: 't1' } },
+                undefined,
+                config,
+                false,
+                true,
+            );
+            const write = resolveCacheTags('Widget', 'update', { where: { id: 'w1' } }, undefined, config, true);
+
+            expect(overlappingTags(read.tags, write.tags).length).toBeGreaterThan(0);
+        });
+
+        test('overlaps a tenant-ful read with a tenant-ful write for the same tenant', () => {
+            const read = resolveCacheTags(
+                'Widget',
+                'findMany',
+                { where: { tenantId: 't1' } },
+                undefined,
+                config,
+                false,
+                true,
+            );
+            const write = resolveCacheTags(
+                'Widget',
+                'update',
+                { where: { tenantId: 't1', id: 'w1' } },
+                undefined,
+                config,
+                true,
+            );
+
+            expect(overlappingTags(read.tags, write.tags).length).toBeGreaterThan(0);
+        });
+
+        test('overlaps a tenant-less read with a tenant-less write', () => {
+            const read = resolveCacheTags('Widget', 'findMany', {}, undefined, config, false, true);
+            const write = resolveCacheTags('Widget', 'updateMany', { where: { active: true } }, undefined, config, true);
+
+            expect(overlappingTags(read.tags, write.tags).length).toBeGreaterThan(0);
+        });
+
+        test('retains overlap when maxTagsPerQuery is one', () => {
+            const cappedConfig = { ...config, maxTagsPerQuery: 1 };
+            const read = resolveCacheTags(
+                'Widget',
+                'findMany',
+                { where: { tenantId: 't1' } },
+                undefined,
+                cappedConfig,
+                false,
+                true,
+            );
+            const write = resolveCacheTags(
+                'Widget',
+                'update',
+                { where: { tenantId: 't1', id: 'w1' } },
+                undefined,
+                cappedConfig,
+                true,
+            );
+
+            expect(overlappingTags(read.tags, write.tags).length).toBeGreaterThan(0);
+        });
+    });
+
+    describe('tenant precision opt-in', () => {
+        const config = makeConfig({ tenantKeys: ['tenantId'], tenantPrecision: true });
+
+        test('keeps different tenants disjoint', () => {
+            const read = resolveCacheTags(
+                'Widget',
+                'findMany',
+                { where: { tenantId: 't1' } },
+                undefined,
+                config,
+                false,
+            );
+            const write = resolveCacheTags(
+                'Widget',
+                'update',
+                { where: { tenantId: 't2', id: 'w1' } },
+                undefined,
+                config,
+                true,
+            );
+
+            expect(overlappingTags(read.tags, write.tags)).toEqual([]);
+        });
+
+        test('keeps a tenant-ful write overlapping a tenant-less read', () => {
+            const read = resolveCacheTags('Widget', 'findMany', {}, undefined, config, false);
+            const write = resolveCacheTags(
+                'Widget',
+                'update',
+                { where: { tenantId: 't1', id: 'w1' } },
+                undefined,
+                config,
+                true,
+            );
+
+            expect(overlappingTags(read.tags, write.tags).length).toBeGreaterThan(0);
+        });
+    });
+
     test('falls back to the global namespace when no tenantKeys are configured', () => {
         const resolved = resolveCacheTags('Widget', 'findMany', { where: { tenantId: 't1' } }, undefined, makeConfig(), false);
 

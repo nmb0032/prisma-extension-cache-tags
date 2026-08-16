@@ -18,6 +18,7 @@ export const DEFAULT_CONFIG: NormalizedCacheConfig = {
     dependencyTags: {},
     inferTags: true,
     tenantKeys: [],
+    tenantPrecision: false,
     entityKeys: ['id'],
     logger: noopLogger,
     metrics: noopMetrics,

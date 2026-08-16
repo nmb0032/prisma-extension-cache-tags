@@ -19,6 +19,7 @@ describe('normalizeConfig', () => {
         expect(config.entityKeys).toEqual(['id']);
         expect(config.keyPrefix).toBe('prismaCacheTags:v1');
         expect(config.enabled).toBe(true);
+        expect(config.tenantPrecision).toBe(false);
     });
 
     test('merges nested stampede options rather than replacing them', () => {
@@ -27,6 +28,10 @@ describe('normalizeConfig', () => {
         expect(config.stampede.waitMs).toBe(99);
         expect(config.stampede.pollMs).toBe(50);
         expect(config.stampede.lockTtlMs).toBe(5000);
+    });
+
+    test('allows tenant precision to be opted into explicitly', () => {
+        expect(normalizeConfig({ tenantPrecision: true }).tenantPrecision).toBe(true);
     });
 });
 
@@ -425,8 +430,8 @@ describe('handleWrite', () => {
         expect(readQuery).toHaveBeenCalledTimes(2);
     });
 
-    test('a write to an unrelated tenant does not invalidate', async () => {
-        const config = normalizeConfig({ tenantKeys: ['tenantId'] });
+    test('a write to an unrelated tenant does not invalidate in precise mode', async () => {
+        const config = normalizeConfig({ tenantKeys: ['tenantId'], tenantPrecision: true });
         const readQuery = vi.fn().mockResolvedValue([{ id: 'w1' }]);
         const readParams = {
             model: 'Widget',
@@ -453,6 +458,67 @@ describe('handleWrite', () => {
         await readThroughCache(readParams);
 
         expect(readQuery).toHaveBeenCalledTimes(1);
+    });
+
+    test('a write to an unrelated tenant invalidates under the safe default', async () => {
+        const config = normalizeConfig({ tenantKeys: ['tenantId'] });
+        const readQuery = vi.fn().mockResolvedValue([{ id: 'w1' }]);
+        const readParams = {
+            model: 'Widget',
+            operation: 'findMany',
+            args: { where: { tenantId: 't1' } },
+            cleanedArgs: { where: { tenantId: 't1' } },
+            query: readQuery,
+            cacheOptions: { ttlSeconds: 60 },
+            config,
+            redisAdapter: redis,
+        };
+
+        await readThroughCache(readParams);
+        await handleWrite({
+            model: 'Widget',
+            operation: 'update',
+            args: { where: { tenantId: 't2', id: 'w2' } },
+            cleanedArgs: { where: { tenantId: 't2', id: 'w2' } },
+            query: vi.fn().mockResolvedValue({ id: 'w2' }),
+            cacheOptions: undefined,
+            config,
+            redisAdapter: redis,
+        });
+        await readThroughCache(readParams);
+
+        expect(readQuery).toHaveBeenCalledTimes(2);
+    });
+
+    test('warns when precise-mode write tenant identity is unavailable', async () => {
+        const warn = vi.fn();
+        const config = normalizeConfig({
+            tenantKeys: ['tenantId'],
+            tenantPrecision: true,
+            logger: {
+                debug: vi.fn(),
+                info: vi.fn(),
+                warn,
+                error: vi.fn(),
+            },
+        });
+
+        const result = await handleWrite({
+            model: 'Widget',
+            operation: 'update',
+            args: { where: { id: 'w1' } },
+            cleanedArgs: { where: { id: 'w1' } },
+            query: vi.fn().mockResolvedValue({ id: 'w1' }),
+            cacheOptions: undefined,
+            config,
+            redisAdapter: redis,
+        });
+
+        expect(result).toEqual({ id: 'w1' });
+        expect(warn).toHaveBeenCalledWith(
+            { model: 'Widget', operation: 'update' },
+            'Tenant identity unavailable after write; invalidating the model-wide cache fallback',
+        );
     });
 
     test('a dependency tag propagates invalidation across models', async () => {

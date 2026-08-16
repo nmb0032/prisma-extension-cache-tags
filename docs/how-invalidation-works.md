@@ -29,12 +29,33 @@ For a read of `Widget.findMany`, the generated Redis key is shaped like
 arguments with the extension-only `cache` property removed, so changing a
 filter, projection, pagination, or generation produces a different key.
 
+## Tag resolution and granularity
+
+With the default `tenantPrecision: false`, every inferred read and write emits
+the unscoped `global:model:<Model>` tag. When a tenant is resolved, tenant,
+tenant-model, and tenant-entity tags are added as well; resolved entity ids
+also receive global entity tags. The global model tag is the correctness
+backstop, so a tenant-less read and a tenant-ful write (or the reverse) still
+share a generation. This is model-level invalidation and can evict other
+tenants' entries.
+
+`tenantPrecision: true` is an opt-in for applications that guarantee every
+cached read and every write includes one of `tenantKeys`. A tenant-resolved read
+uses tenant tags only. A tenant-resolved write uses tenant tags plus the
+unscoped model tag so tenant-less reads are still invalidated. A write without a
+resolved tenant falls back to unscoped global tags and logs a warning; callers
+must maintain the invariant for tenant-precise reads to remain sound. When tag
+lists are capped, an emitted unscoped model tag is retained before other tags
+are truncated.
+
 ## What a write does
 
 After a write succeeds, the extension resolves the same inferred and explicit
 tags and increments each unique tag counter. Invalidation cost is therefore
 independent of how many keys are cached: it is one `INCR` per affected tag, not
-one delete per matching key.
+one delete per matching key. The tag-resolution mode described above determines
+which generations the write advances; the invalidation mechanism itself never
+enumerates cache keys.
 
 There is no tag-to-key index to maintain or garbage-collect. Incrementing a
 counter makes every older generation unreachable immediately. Those orphaned

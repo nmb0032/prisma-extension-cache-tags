@@ -47,14 +47,30 @@ await prisma.widget.update({
 ```
 
 When `tenantKeys` is configured, an ID-only update or delete uses the returned
-record to identify its tenant. If a write result genuinely omits every tenant
-key, the extension uses a model-wide fallback generation; tenant-scoped reads
-carry that fallback so correctness is preserved, at the cost of evicting all
-tenant caches for that model.
+record to identify its tenant when possible. By default, every inferred read and
+write also carries the unscoped `global:model:<Model>` tag. This is deliberately
+model-level invalidation: it keeps ambiguous read/write arguments correct, but a
+write in one tenant can evict cached reads for every tenant.
+
+Set `tenantPrecision: true` only when the application guarantees that every
+cached read and every write includes one of the configured `tenantKeys` (for
+example, a Prisma client already scoped per tenant):
+
+```ts
+createCacheTagsExtension(createNodeRedisAdapter(redis), {
+    tenantKeys: ['organizationId'],
+    tenantPrecision: true,
+});
+```
+
+Precision mode omits the global model tag from tenant-resolved reads. Writes
+with a resolved tenant still include it so tenant-less reads are invalidated; a
+write that cannot resolve a tenant falls back to global model tags and logs a
+warning. If the invariant is not guaranteed, keep the safe default.
 
 ## How invalidation works
 
-On a cached read, the extension infers tenant, model, and entity tags from the Prisma arguments. Configure argument names with `tenantKeys` and `entityKeys`, or add explicit `cache.tags` when a query needs a broader or custom scope.
+On a cached read, the extension infers tenant, model, and entity tags from the Prisma arguments. Configure argument names with `tenantKeys` and `entityKeys`, or add explicit `cache.tags` when a query needs a broader or custom scope. The default model-level fallback is retained whenever it is emitted, even when `maxTagsPerQuery` truncates the tag list.
 
 Each tag has a Redis version counter, and the current counter values are folded into the cache key. A read therefore selects the current generation without maintaining a list of every key that carries the tag.
 

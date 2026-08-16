@@ -1,3 +1,4 @@
+import { READ_OPERATIONS } from './types';
 import type { CacheReadOptions, CacheWriteOptions, NormalizedCacheConfig, ResolvedCacheTags } from './types';
 
 const IGNORED_KEYS = new Set(['select', 'include', 'orderBy', 'skip', 'take', 'cursor', 'distinct', 'cache']);
@@ -63,13 +64,26 @@ function collectStringValues(value: unknown, keys: Set<string>, results = new Se
     return results;
 }
 
-export function normalizeTags(tags: string[] | undefined, maxTags: number): string[] {
+export function normalizeTags(tags: string[] | undefined, maxTags: number, requiredTag?: string): string[] {
     if (!tags || tags.length === 0) {
         return [];
     }
 
     const uniqueTags = Array.from(new Set(tags.map((tag) => tag.trim()).filter((tag) => tag.length > 0)));
-    return uniqueTags.sort().slice(0, maxTags);
+    const sortedTags = uniqueTags.sort();
+    if (maxTags <= 0) {
+        return [];
+    }
+
+    const retainedModelTag =
+        (requiredTag && sortedTags.includes(requiredTag) ? requiredTag : undefined) ??
+        sortedTags.find((tag) => tag.startsWith('global:model:'));
+
+    if (!retainedModelTag || sortedTags.length <= maxTags) {
+        return sortedTags.slice(0, maxTags);
+    }
+
+    return [retainedModelTag, ...sortedTags.filter((tag) => tag !== retainedModelTag).slice(0, maxTags - 1)];
 }
 
 function createModelTag(model: string, tenantId?: string): string {
@@ -126,6 +140,8 @@ export function resolveCacheTags(
     const tenantIds = shouldInfer && tenantKeys.size > 0 ? Array.from(collectStringValues(sources, tenantKeys)) : [];
     const entityIds = shouldInfer ? Array.from(collectStringValues(sources, entityKeys)) : [];
     const inferredTags: string[] = [];
+    const isReadOperation =
+        includeGlobalModelFallback || READ_OPERATIONS.includes(operation as (typeof READ_OPERATIONS)[number]);
 
     if (shouldInfer) {
         if (tenantIds.length > 0) {
@@ -135,8 +151,14 @@ export function resolveCacheTags(
                     inferredTags.push(createEntityTag(model, entityId, tenantId));
                 }
             }
-            if (includeGlobalModelFallback) {
+            if (!config.tenantPrecision || !isReadOperation) {
                 inferredTags.push(createModelTag(model));
+            }
+
+            if (!config.tenantPrecision) {
+                for (const entityId of entityIds) {
+                    inferredTags.push(createEntityTag(model, entityId));
+                }
             }
         } else {
             inferredTags.push(createModelTag(model));
@@ -151,9 +173,11 @@ export function resolveCacheTags(
     }
 
     const candidateTags = shouldMerge ? [...inferredTags, ...explicitTags] : explicitTags;
+    const modelTag = createModelTag(model);
+    const modelTagWasEmitted = shouldInfer && shouldMerge && inferredTags.includes(modelTag);
 
     return {
-        tags: normalizeTags(candidateTags, config.maxTagsPerQuery),
+        tags: normalizeTags(candidateTags, config.maxTagsPerQuery, modelTagWasEmitted ? modelTag : undefined),
         tenantIds,
         entityIds,
     };

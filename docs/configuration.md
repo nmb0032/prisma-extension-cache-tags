@@ -19,6 +19,7 @@ The extension uses the defaults below when a field is omitted.
 | `dependencyTags` | `Record<string, string[] \| CacheDependencyResolver>` | `{}` | Adds model or custom tags to a write so related model reads are invalidated too. |
 | `inferTags` | `boolean` | `true` | Enables automatic tenant, model, and entity tag inference. |
 | `tenantKeys` | `string[]` | `[]` | Prisma argument property names that identify tenants. With no tenant keys, inferred tags use the `global:` namespace. |
+| `tenantPrecision` | `boolean` | `false` | Opts into tenant-precise reads when every cached read and write is guaranteed to include one of `tenantKeys`; otherwise the safe model-level default is recommended. |
 | `entityKeys` | `string[]` | `['id']` | Prisma argument property names that identify individual records. |
 | `logger` | `Logger` | No-op logger | Receives structured debug, warning, and error events emitted by the extension. The `info` method is part of the interface but is not currently emitted by core operations. |
 | `metrics` | `Metrics` | No-op metrics sink | Receives cache hit and miss events through `onCacheEvent`. |
@@ -40,13 +41,22 @@ const config: CacheTagsConfig = {
 For writes, tenant values are inferred from the Prisma arguments and, when
 available, the successful returned record. This means an update or delete such
 as `where: { id: 'widget_1' }` can still invalidate the affected tenant when
-the returned row includes `organizationId`. If automatic inference cannot find
-a tenant value, the extension uses the related `global:model:<Model>` fallback
-tag. Tenant-scoped inferred reads carry that fallback tag, so the write remains
-correct but may evict every tenant's cache for that model. Include a tenant
-key in the write or provide explicit `cache.tags` to avoid that broad fallback.
-When `inferTags: false` or `mergeTags: false` is used, the caller is responsible
-for supplying the complete invalidation scope explicitly.
+the returned row includes `organizationId`.
+
+With the default `tenantPrecision: false`, every inferred read and write emits
+the unscoped `global:model:<Model>` tag. Tenant and entity tags are added when
+their values are available, but invalidation granularity remains model-level so
+ambiguous arguments cannot leave a cached read stale. The global model tag is
+retained when `maxTagsPerQuery` truncates the tag list.
+
+Set `tenantPrecision: true` only when every cached read and every write includes
+one of `tenantKeys` in its arguments. Tenant-resolved reads then use tenant tags
+without the unscoped model tag. Tenant-resolved writes include both tenant tags
+and the unscoped model tag so tenant-less reads are invalidated. If a write
+cannot resolve a tenant, it uses the global fallback and logs a warning; this
+mode is not a substitute for the required invariant. When `inferTags: false` or
+`mergeTags: false` is used, the caller is responsible for supplying the
+complete invalidation scope explicitly.
 
 ### Entity keys
 
@@ -177,7 +187,7 @@ Caching is opt-in: add a `cache` object to a supported read operation
 
 | Name | Type | Default | What it does |
 | --- | --- | --- | --- |
-| `ttlSeconds` | `number` | `config.defaultTtlSeconds` | Requested cache TTL, clamped to `config.maxTtlSeconds` and never below one second. |
+| `ttlSeconds` | `number` | `config.defaultTtlSeconds` | Requested cache TTL, clamped to `config.maxTtlSeconds` and never below one second (including for zero or negative requests). |
 | `key` | `string` | Generated key | Uses a stable custom key while still incorporating schema and tag generations. |
 | `enabled` | `boolean` | `true` when `cache` is present | Set to `false` to bypass the cache for one read. |
 | `debug` | `boolean` | `false` | Emits debug hit, miss, and population messages through `logger`. |

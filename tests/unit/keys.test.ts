@@ -17,6 +17,7 @@ const config: NormalizedCacheConfig = {
     dependencyTags: {},
     inferTags: true,
     tenantKeys: [],
+    tenantPrecision: false,
     entityKeys: ['id'],
     logger: noopLogger,
     metrics: noopMetrics,

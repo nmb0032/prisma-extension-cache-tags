@@ -68,7 +68,21 @@ describe('read-through caching', () => {
         expect(counter.byModel.Widget).toBe(3); // initial read + create + re-read
     });
 
-    test('a write to a different tenant does not invalidate', async () => {
+    test('a write to a different tenant does not invalidate in precise mode', async () => {
+        const precise = createCachedClient(redis, counter, { tenantPrecision: true });
+        dependentClients.push(precise);
+        await precise.widget.create({ data: { tenantId: 't1', name: 'w1' } });
+        counter.reset();
+
+        await precise.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+        await precise.widget.create({ data: { tenantId: 't2', name: 'other' } });
+        await precise.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+
+        // read (1) + create (1) + cache hit (0)
+        expect(counter.byModel.Widget).toBe(2);
+    });
+
+    test('a write to a different tenant invalidates under the safe default', async () => {
         await prisma.widget.create({ data: { tenantId: 't1', name: 'w1' } });
         counter.reset();
 
@@ -76,32 +90,34 @@ describe('read-through caching', () => {
         await prisma.widget.create({ data: { tenantId: 't2', name: 'other' } });
         await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
 
-        // read (1) + create (1) + cache hit (0)
-        expect(counter.byModel.Widget).toBe(2);
+        // read (1) + create (1) + invalidated read (1)
+        expect(counter.byModel.Widget).toBe(3);
     });
 
     test('update and delete by ID invalidate the returned record tenant only', async () => {
-        const first = await prisma.widget.create({ data: { tenantId: 't1', name: 'w1' } });
-        await prisma.widget.create({ data: { tenantId: 't2', name: 'other' } });
+        const precise = createCachedClient(redis, counter, { tenantPrecision: true });
+        dependentClients.push(precise);
+        const first = await precise.widget.create({ data: { tenantId: 't1', name: 'w1' } });
+        await precise.widget.create({ data: { tenantId: 't2', name: 'other' } });
         counter.reset();
 
-        await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
-        await prisma.widget.findMany({ where: { tenantId: 't2' }, cache: { ttlSeconds: 60 } });
+        await precise.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+        await precise.widget.findMany({ where: { tenantId: 't2' }, cache: { ttlSeconds: 60 } });
 
-        await prisma.widget.update({
+        await precise.widget.update({
             where: { id: first.id },
             data: { name: 'renamed' },
         });
 
-        const afterUpdate = await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
-        const otherAfterUpdate = await prisma.widget.findMany({ where: { tenantId: 't2' }, cache: { ttlSeconds: 60 } });
+        const afterUpdate = await precise.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+        const otherAfterUpdate = await precise.widget.findMany({ where: { tenantId: 't2' }, cache: { ttlSeconds: 60 } });
         expect(afterUpdate[0]?.name).toBe('renamed');
         expect(otherAfterUpdate).toHaveLength(1);
 
-        await prisma.widget.delete({ where: { id: first.id } });
+        await precise.widget.delete({ where: { id: first.id } });
 
-        const afterDelete = await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
-        const otherAfterDelete = await prisma.widget.findMany({ where: { tenantId: 't2' }, cache: { ttlSeconds: 60 } });
+        const afterDelete = await precise.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+        const otherAfterDelete = await precise.widget.findMany({ where: { tenantId: 't2' }, cache: { ttlSeconds: 60 } });
         expect(afterDelete).toEqual([]);
         expect(otherAfterDelete).toHaveLength(1);
         expect(counter.byModel.Widget).toBe(6);

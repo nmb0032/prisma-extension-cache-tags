@@ -185,9 +185,10 @@ export interface Metrics {
  * const prismaAdapter = new PrismaPg({
  *   connectionString: process.env.DATABASE_URL ?? 'postgresql://user:password@localhost:5432/app',
  * });
+ * const redisAdapter = createNodeRedisAdapter(redis);
  *
  * const prisma = new PrismaClient({ adapter: prismaAdapter }).$extends(
- *   createCacheTagsExtension(createNodeRedisAdapter(redis), {
+ *   createCacheTagsExtension(redisAdapter, {
  *     defaultTtlSeconds: 60,
  *     maxTtlSeconds: 600,
  *     keyPrefix: 'myapp:cache:v1',
@@ -235,6 +236,18 @@ export interface CacheTagsConfig {
      * Default: [] — no tenant scoping, tags fall back to the `global:` namespace.
      */
     tenantKeys?: string[];
+    /**
+     * Assume every cached read AND every write carries a tenant key in its args.
+     *
+     * Default `false`: reads and writes both always emit the model-level tag, so a write can
+     * never miss a cached read. Invalidation granularity is per-model.
+     *
+     * Set `true` only if your application guarantees that every cached read and every write
+     * includes one of `tenantKeys` in its args — for example a Prisma client already scoped per
+     * tenant. Invalidation then stays tenant-precise, and a write that cannot resolve a tenant
+     * falls back to invalidating the model across all tenants and logs a warning.
+     */
+    tenantPrecision?: boolean;
     /** Arg property names that identify a single record. Default: ['id'] */
     entityKeys?: string[];
     /** Structured logger. Default: no-op. */
@@ -256,6 +269,7 @@ export interface NormalizedCacheConfig {
     dependencyTags: Record<string, string[] | CacheDependencyResolver>;
     inferTags: boolean;
     tenantKeys: string[];
+    tenantPrecision: boolean;
     entityKeys: string[];
     logger: Logger;
     metrics: Metrics;

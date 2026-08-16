@@ -218,7 +218,7 @@ export async function handleWrite(params: {
 
     const shouldInfer = cacheOptions?.inferTags ?? config.inferTags;
     const shouldMerge = cacheOptions?.mergeTags ?? true;
-    if (config.tenantKeys.length > 0 && shouldInfer && shouldMerge && resolvedTags.tenantIds.length === 0) {
+    if (config.tenantPrecision && config.tenantKeys.length > 0 && resolvedTags.tenantIds.length === 0) {
         config.logger.warn(
             { model, operation },
             'Tenant identity unavailable after write; invalidating the model-wide cache fallback',

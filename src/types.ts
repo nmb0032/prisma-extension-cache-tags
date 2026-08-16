@@ -1,0 +1,395 @@
+import type { Prisma } from '@prisma/client/extension';
+import type { Operation } from '@prisma/client/runtime/client';
+import type superjson from 'superjson';
+
+/**
+ * Cached value envelope that includes fingerprint for validation
+ */
+export interface CachedEnvelope {
+    fingerprint: string;
+    value: ReturnType<typeof superjson.serialize>;
+}
+
+/**
+ * Redis adapter interface for cache operations
+ *
+ * This interface defines the minimal Redis operations required by the cache extension.
+ * Users can provide their own Redis client implementation that matches this interface.
+ *
+ * @example
+ * ```typescript
+ * import { createClient } from 'redis';
+ *
+ * const client = createClient({ url: 'redis://localhost:6379' });
+ * await client.connect();
+ *
+ * const adapter: RedisAdapter = {
+ *   get: async <T>(key: string) => {
+ *     const value = await client.get(key);
+ *     return value ? JSON.parse(value) as T : null;
+ *   },
+ *   set: async (key: string, value: unknown, ttlSeconds?: number) => {
+ *     const serialized = JSON.stringify(value);
+ *     if (ttlSeconds) {
+ *       await client.setEx(key, ttlSeconds, serialized);
+ *     } else {
+ *       await client.set(key, serialized);
+ *     }
+ *   },
+ *   delete: async (key: string) => {
+ *     await client.del(key);
+ *   },
+ *   increment: async (key: string, amount = 1) => {
+ *     return amount === 1 ? await client.incr(key) : await client.incrBy(key, amount);
+ *   },
+ *   expire: async (key: string, ttlSeconds: number) => {
+ *     await client.expire(key, ttlSeconds);
+ *   },
+ *   mgetString: async (keys: string[]) => {
+ *     return keys.length === 0 ? [] : await client.mGet(keys);
+ *   },
+ * };
+ * ```
+ */
+export interface RedisAdapter {
+    /** Get a value from Redis, deserialized as type T */
+    get<T>(key: string): Promise<T | null>;
+    /** Set a value in Redis with optional TTL */
+    set(key: string, value: unknown, ttlSeconds?: number): Promise<void>;
+    /** Delete a key from Redis */
+    delete(key: string): Promise<void>;
+    /** Increment a numeric value in Redis */
+    increment(key: string, amount?: number): Promise<number>;
+    /** Set expiration on a key */
+    expire(key: string, ttlSeconds: number): Promise<void>;
+    /** Get multiple string values from Redis */
+    mgetString(keys: string[]): Promise<Array<string | null>>;
+    /** Atomically set a string value only when the key does not exist, with a TTL in milliseconds */
+    setIfNotExists?(key: string, value: string, ttlMs: number): Promise<boolean>;
+    /** Atomically delete a key only when its current string value matches */
+    deleteIfValue?(key: string, value: string): Promise<boolean>;
+}
+
+export interface CacheStampedeOptions {
+    /** Maximum time waiters spend polling for the lock owner to populate the cache */
+    waitMs?: number;
+    /** Poll interval while waiting for the cache owner */
+    pollMs?: number;
+    /** Redis lock TTL; should be longer than the expected DB query duration */
+    lockTtlMs?: number;
+}
+
+/**
+ * Cache options for read operations (findMany, findUnique, findFirst, count, aggregate, groupBy)
+ *
+ * @example
+ * ```typescript
+ * // Enable caching with custom TTL
+ * cache: { ttlSeconds: 60 }
+ *
+ * // Use custom cache key
+ * cache: { key: 'my-custom-key', ttlSeconds: 300 }
+ *
+ * // Enable debug logging
+ * cache: { ttlSeconds: 60, debug: true }
+ *
+ * // Disable caching for this query
+ * cache: { enabled: false }
+ *
+ * // Multi-tenant scoping with tags
+ *   cache: { ttlSeconds: 60, tags: ['tenant:123', 'tenant:123:model:Widget'] }
+ * ```
+ */
+export interface CacheReadOptions {
+    /** TTL in seconds. If not provided, uses defaultTtlSeconds from config */
+    ttlSeconds?: number;
+    /** Optional custom cache key override */
+    key?: string;
+    /** Enable/disable caching for this query (defaults to true if cache option is present) */
+    enabled?: boolean;
+    /** Enable debug logging for cache hits/misses */
+    debug?: boolean;
+    /** Tags for scoped cache invalidation (e.g., ['tenant:123'] for multi-tenant) */
+    tags?: string[];
+    /** Infer tenant/model/entity tags from Prisma args (default: true) */
+    inferTags?: boolean;
+    /** Merge explicit tags with inferred tags (default: true). When false, explicit tags replace inferred tags. */
+    mergeTags?: boolean;
+    /** Override stampede protection settings for this query */
+    stampede?: CacheStampedeOptions;
+}
+
+/**
+ * Cache options for write operations (create, update, delete, upsert, createMany, updateMany, deleteMany)
+ *
+ * @example
+ * ```typescript
+ * // Invalidate cache with tags (scoped invalidation)
+ * cache: { tags: ['tenant:123', 'tenant:123:model:Widget'] }
+ *
+ * // Enable debug logging for cache invalidation
+ * cache: { tags: ['tenant:123'], debug: true }
+ * ```
+ */
+export interface CacheWriteOptions {
+    /** Tags for scoped cache invalidation (e.g., ['tenant:123'] for multi-tenant) */
+    tags?: string[];
+    /** Enable debug logging for cache invalidation */
+    debug?: boolean;
+    /** Infer tenant/model/entity tags from Prisma args/data (default: true) */
+    inferTags?: boolean;
+    /** Merge explicit tags with inferred tags (default: true). When false, explicit tags replace inferred tags. */
+    mergeTags?: boolean;
+}
+
+export type CacheDependencyResolver = (context: {
+    model: string;
+    operation: string;
+    tenantIds: string[];
+    entityIds: string[];
+    args: unknown;
+}) => string[];
+
+export type LogData = Record<string, unknown>;
+
+export interface Logger {
+    debug(data: LogData, message: string): void;
+    info(data: LogData, message: string): void;
+    warn(data: LogData, message: string): void;
+    error(data: LogData, message: string): void;
+}
+
+export interface CacheEvent {
+    model: string;
+    operation: string;
+    result: 'hit' | 'miss';
+}
+
+export interface Metrics {
+    onCacheEvent(event: CacheEvent): void;
+}
+
+/**
+ * Configuration for the Prisma cache-tags extension
+ *
+ * @example
+ * ```typescript
+ * // Simple configuration
+ * const prisma = new PrismaClient().$extends(
+ *   createCachedPrismaExtension({
+ *     defaultTtlSeconds: 60,
+ *     maxTtlSeconds: 600,
+ *     keyPrefix: 'myapp:cache:v1'
+ *   })
+ * );
+ *
+ * // Use tags directly on writes and reads
+ * await prisma.widget.create({
+ *   data: { name: 'Example', tenantId: '123' },
+ *   cache: { tags: ['tenant:123'] }
+ * });
+ *
+ * await prisma.widget.findMany({
+ *   where: { tenantId: '123' },
+ *   cache: { tags: ['tenant:123'] }
+ * });
+ * ```
+ */
+export interface CacheTagsConfig {
+    /** Enable/disable caching globally (default: true) */
+    enabled?: boolean;
+    /** Default TTL in seconds when not specified (default: 30) */
+    defaultTtlSeconds?: number;
+    /** Maximum allowed TTL in seconds (default: 300) */
+    maxTtlSeconds?: number;
+    /** Key prefix for all cache keys (default: 'prismaCacheTags:v1') */
+    keyPrefix?: string;
+    /** Cache null results (default: true) */
+    cacheNull?: boolean;
+    /** Cache empty array results (default: true) */
+    cacheEmpty?: boolean;
+    /** Bump to invalidate every cache entry after a breaking code change (default: 1) */
+    schemaVersion?: number;
+    /** Maximum number of tags allowed per query (default: 30) */
+    maxTagsPerQuery?: number;
+    /** Default stampede protection behaviour */
+    stampede?: CacheStampedeOptions;
+    /** Models whose caches must also be invalidated when a given model is written */
+    dependencyTags?: Record<string, string[] | CacheDependencyResolver>;
+    /** Enable automatic tenant/model/entity tag inference (default: true) */
+    inferTags?: boolean;
+    /**
+     * Arg property names that identify the tenant, e.g. ['tenantId', 'accountId'].
+     * Default: [] — no tenant scoping, tags fall back to the `global:` namespace.
+     */
+    tenantKeys?: string[];
+    /** Arg property names that identify a single record. Default: ['id'] */
+    entityKeys?: string[];
+    /** Structured logger. Default: no-op. */
+    logger?: Logger;
+    /** Metrics sink for cache hit/miss events. Default: no-op. */
+    metrics?: Metrics;
+}
+
+export interface NormalizedCacheConfig {
+    enabled: boolean;
+    defaultTtlSeconds: number;
+    maxTtlSeconds: number;
+    keyPrefix: string;
+    cacheNull: boolean;
+    cacheEmpty: boolean;
+    schemaVersion: number;
+    maxTagsPerQuery: number;
+    stampede: Required<CacheStampedeOptions>;
+    dependencyTags: Record<string, string[] | CacheDependencyResolver>;
+    inferTags: boolean;
+    tenantKeys: string[];
+    entityKeys: string[];
+    logger: Logger;
+    metrics: Metrics;
+}
+
+export interface ResolvedCacheTags {
+    tags: string[];
+    tenantIds: string[];
+    entityIds: string[];
+}
+
+/**
+ * Cacheable read operations
+ */
+export const READ_OPERATIONS = [
+    'findUnique',
+    'findFirst',
+    'findMany',
+    'count',
+    'aggregate',
+    'groupBy',
+] as const satisfies ReadonlyArray<Operation>;
+
+/**
+ * Write operations that trigger cache invalidation
+ */
+export const WRITE_OPERATIONS = [
+    'create',
+    'update',
+    'delete',
+    'upsert',
+    'createMany',
+    'updateMany',
+    'deleteMany',
+] as const satisfies ReadonlyArray<Operation>;
+
+/**
+ * Read operations that require args
+ */
+export const CACHE_REQUIRED_ARG_OPERATIONS = ['findUnique', 'groupBy'] as const satisfies ReadonlyArray<Operation>;
+
+/**
+ * Read operations that have optional args
+ */
+export const CACHE_OPTIONAL_ARG_OPERATIONS = ['findFirst', 'findMany', 'count', 'aggregate'] as const satisfies ReadonlyArray<Operation>;
+
+/**
+ * Write operations that require args
+ */
+export const UNCACHE_REQUIRED_ARG_OPERATIONS = ['create', 'delete', 'update', 'upsert'] as const satisfies ReadonlyArray<Operation>;
+
+/**
+ * Write operations that have optional args
+ */
+export const UNCACHE_OPTIONAL_ARG_OPERATIONS = ['createMany', 'updateMany', 'deleteMany'] as const satisfies ReadonlyArray<Operation>;
+
+export type ReadOperation = (typeof READ_OPERATIONS)[number];
+export type WriteOperation = (typeof WRITE_OPERATIONS)[number];
+
+/**
+ * Type for Prisma args with cache read options
+ */
+type PrismaCacheReadArgs = {
+    cache?: CacheReadOptions;
+};
+
+/**
+ * Type for Prisma args with cache write options
+ */
+type PrismaCacheWriteArgs = {
+    cache?: CacheWriteOptions;
+};
+
+/**
+ * Cache-enabled function type for operations with required args
+ */
+type CacheRequiredArgsFunction<O extends Operation> = <T, A>(
+    this: T,
+    args: Prisma.Exact<A, Prisma.Args<T, O> & PrismaCacheReadArgs>,
+) => Promise<Prisma.Result<T, A, O>>;
+
+/**
+ * Cache-enabled function type for operations with optional args
+ */
+type CacheOptionalArgsFunction<O extends Operation> = <T, A>(
+    this: T,
+    args?: Prisma.Exact<A, Prisma.Args<T, O> & PrismaCacheReadArgs>,
+) => Promise<Prisma.Result<T, A, O>>;
+
+/**
+ * Uncache-enabled function type for operations with required args
+ */
+type UncacheRequiredArgsFunction<O extends Operation> = <T, A>(
+    this: T,
+    args: Prisma.Exact<A, Prisma.Args<T, O> & PrismaCacheWriteArgs>,
+) => Promise<Prisma.Result<T, A, O>>;
+
+/**
+ * Uncache-enabled function type for operations with optional args
+ */
+type UncacheOptionalArgsFunction<O extends Operation> = <T, A>(
+    this: T,
+    args?: Prisma.Exact<A, Prisma.Args<T, O> & PrismaCacheWriteArgs>,
+) => Promise<Prisma.Result<T, A, O>>;
+
+/**
+ * Configuration for operations split by required/optional args
+ */
+type OperationsConfig<RequiredArg extends Operation[], OptionalArg extends Operation[]> = {
+    requiredArg: RequiredArg;
+    optionalArg: OptionalArg;
+};
+
+/**
+ * Model extension type that adds cache/uncache options to operations
+ */
+type ModelExtension<
+    CacheConfig extends OperationsConfig<Operation[], Operation[]>,
+    UncacheConfig extends OperationsConfig<Operation[], Operation[]>,
+> = {
+    [RO in CacheConfig['requiredArg'][number]]: CacheRequiredArgsFunction<RO>;
+} & {
+    [OO in CacheConfig['optionalArg'][number]]: CacheOptionalArgsFunction<OO>;
+} & {
+    [URO in UncacheConfig['requiredArg'][number]]: UncacheRequiredArgsFunction<URO>;
+} & {
+    [UOO in UncacheConfig['optionalArg'][number]]: UncacheOptionalArgsFunction<UOO>;
+};
+
+/**
+ * Cache operations configuration
+ */
+type cacheConfig = {
+    requiredArg: (typeof CACHE_REQUIRED_ARG_OPERATIONS)[number][];
+    optionalArg: (typeof CACHE_OPTIONAL_ARG_OPERATIONS)[number][];
+};
+
+/**
+ * Uncache operations configuration
+ */
+type uncacheConfig = {
+    requiredArg: (typeof UNCACHE_REQUIRED_ARG_OPERATIONS)[number][];
+    optionalArg: (typeof UNCACHE_OPTIONAL_ARG_OPERATIONS)[number][];
+};
+
+/**
+ * Extended model type with cache and uncache operations
+ */
+export type ExtendedModel = ModelExtension<cacheConfig, uncacheConfig>;

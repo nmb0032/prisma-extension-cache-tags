@@ -85,7 +85,7 @@
         "test": "pnpm run test:unit",
         "test:unit": "vitest run --project unit",
         "test:integration": "vitest run --project integration",
-        "test:load": "tsx tests/load/invalidation-scaling.ts",
+        "test:benchmark:invalidation": "tsx tests/load/invalidation-scaling.ts",
         "test:e2e": "tsx tests/e2e/package-smoke.ts",
         "db:up": "docker compose up -d --wait",
         "db:down": "docker compose down -v"

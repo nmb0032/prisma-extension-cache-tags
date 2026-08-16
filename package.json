@@ -1,0 +1,100 @@
+{
+    "name": "prisma-extension-cache-tags",
+    "version": "0.0.0",
+    "description": "Redis caching for Prisma with automatic, generational tag invalidation. O(1) invalidation, no SCAN, transaction-safe.",
+    "keywords": [
+        "prisma",
+        "prisma-extension",
+        "redis",
+        "cache",
+        "invalidation",
+        "multi-tenant"
+    ],
+    "license": "MIT",
+    "type": "commonjs",
+    "main": "./dist/index.js",
+    "module": "./dist/index.mjs",
+    "types": "./dist/index.d.ts",
+    "files": [
+        "dist",
+        "README.md",
+        "LICENSE"
+    ],
+    "exports": {
+        ".": {
+            "import": {
+                "types": "./dist/index.d.mts",
+                "default": "./dist/index.mjs"
+            },
+            "require": {
+                "types": "./dist/index.d.ts",
+                "default": "./dist/index.js"
+            }
+        },
+        "./node-redis": {
+            "import": {
+                "types": "./dist/adapters/node-redis.d.mts",
+                "default": "./dist/adapters/node-redis.mjs"
+            },
+            "require": {
+                "types": "./dist/adapters/node-redis.d.ts",
+                "default": "./dist/adapters/node-redis.js"
+            }
+        },
+        "./ioredis": {
+            "import": {
+                "types": "./dist/adapters/ioredis.d.mts",
+                "default": "./dist/adapters/ioredis.mjs"
+            },
+            "require": {
+                "types": "./dist/adapters/ioredis.d.ts",
+                "default": "./dist/adapters/ioredis.js"
+            }
+        },
+        "./package.json": "./package.json"
+    },
+    "engines": {
+        "node": "^20.19 || ^22.12 || >=24.0"
+    },
+    "scripts": {
+        "build": "tsup",
+        "clean": "rm -rf dist",
+        "typecheck": "tsc --noEmit",
+        "lint": "eslint .",
+        "format": "prettier --write .",
+        "test": "pnpm run test:unit",
+        "test:unit": "vitest run --dir tests/unit",
+        "test:integration": "vitest run --dir tests/integration",
+        "test:load": "tsx tests/load/invalidation-scaling.ts",
+        "test:e2e": "tsx tests/e2e/package-smoke.ts",
+        "db:up": "docker compose up -d --wait",
+        "db:down": "docker compose down -v"
+    },
+    "dependencies": {
+        "hash-object": "^5.1.0",
+        "superjson": "^2.2.6"
+    },
+    "peerDependencies": {
+        "@prisma/client": "^7.2.0",
+        "ioredis": "^5.0.0 || ^6.0.0",
+        "redis": "^5.0.0 || ^6.0.0"
+    },
+    "peerDependenciesMeta": {
+        "ioredis": {
+            "optional": true
+        },
+        "redis": {
+            "optional": true
+        }
+    },
+    "devDependencies": {
+        "@prisma/adapter-pg": "7.9.1",
+        "@prisma/client": "7.9.1",
+        "@types/node": "^24.7.2",
+        "prisma": "7.9.1",
+        "tsup": "^8.5.1",
+        "tsx": "^4.19.0",
+        "typescript": "^5.6.0",
+        "vitest": "^4.1.10"
+    }
+}

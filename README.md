@@ -104,7 +104,43 @@ The design deliberately focuses on predictable Prisma read-through caching and c
 | Value storage | Superjson envelopes through a normal Redis client | No RedisJSON integration |
 | Runtime | Prisma 7 driver-adapter setup for supported Node releases | Edge-runtime testing is not provided |
 | Operations | Bring your own Redis deployment and client adapter | No hosted option |
-| Measurements | The load harness measures this package's invalidation scaling | No latency comparisons against other packages are published |
+
+## Benchmarks
+
+Run the benchmarks after completing the local setup in [CONTRIBUTING.md](CONTRIBUTING.md):
+install dependencies, start PostgreSQL and Redis with `pnpm db:up`, set
+`TEST_DATABASE_URL` and `TEST_REDIS_URL` as needed, and prepare the Prisma fixture
+schema. The invalidation benchmark only needs Redis; the model-backed benchmark
+needs both PostgreSQL and Redis.
+
+```bash
+pnpm test:benchmark:invalidation
+pnpm test:benchmark:load
+pnpm test:benchmark:load -- --profile stress
+pnpm test:benchmark:load -- --preserve
+```
+
+`test:benchmark:invalidation` is a synthetic keyspace-scaling microbenchmark. It
+seeds synthetic cached-query keys and measures whether generational invalidation
+cost changes as the Redis keyspace grows. `test:benchmark:load` runs real Prisma
+`Widget` and `Part` reads and writes against PostgreSQL and Redis through the
+cache extension. It uses the `quick` profile by default; `--profile stress` uses
+a larger dataset, more concurrency, and a longer measurement window for deliberate
+capacity investigations.
+
+The invalidation benchmark reports p50 and p99 invalidation latency by keyspace
+and verifies the expected Redis `INCRBY` count. The model-backed report includes
+throughput, p50/p95/p99 latency, cache hit rate, database query count, errors, and
+freshness failures. Performance numbers are informational only and are not CI
+gates; correctness failures, workload errors, and freshness failures still make
+the command fail.
+
+The model-backed benchmark normally removes only the current run's database rows
+and Redis namespace, and never flushes the Redis database. Pass `--preserve` to
+skip that cleanup and inspect the run; the command prints the run ID, tenant IDs,
+and Redis key prefix. The synthetic invalidation benchmark resets its disposable
+Redis database with `FLUSHDB`, so run it only against a disposable database with
+no concurrent users.
 
 ## License
 

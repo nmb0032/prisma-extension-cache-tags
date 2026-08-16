@@ -54,12 +54,13 @@ export async function generateCacheKey(
     config: NormalizedCacheConfig,
     redisAdapter: RedisAdapter,
 ): Promise<string> {
+    const normalizedTags = normalizeTags(tags, config.maxTagsPerQuery);
     const payload = {
         model,
         operation,
         args: removeCacheFromArgs(args),
         schemaVersion: config.schemaVersion,
-        tagVersions: await getTagVersions(tags, config, redisAdapter),
+        tagVersions: await getTagVersions(normalizedTags, config, redisAdapter),
     };
 
     return `${config.keyPrefix}:qry:${model}:${operation}:${hash(payload)}`;

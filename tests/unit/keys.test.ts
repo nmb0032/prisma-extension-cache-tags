@@ -52,6 +52,22 @@ describe('cache keys', () => {
         expect(after).not.toBe(before);
     });
 
+    test('normalizes tag ordering, whitespace, and limits before generating the key', async () => {
+        const limitedConfig = { ...config, maxTagsPerQuery: 2 };
+        const args = { where: { tenantId: 't1' } };
+        const normalized = await generateCacheKey('Widget', 'findMany', args, ['alpha', 'beta'], limitedConfig, redis);
+        const unnormalized = await generateCacheKey(
+            'Widget',
+            'findMany',
+            args,
+            [' beta ', 'ignored', 'alpha'],
+            limitedConfig,
+            redis,
+        );
+
+        expect(unnormalized).toBe(normalized);
+    });
+
     test('ignore the cache property when computing a fingerprint', () => {
         const withCache = computeFingerprint('Widget', 'findMany', { where: { a: 1 }, cache: { ttlSeconds: 5 } }, [], config);
         const without = computeFingerprint('Widget', 'findMany', { where: { a: 1 } }, [], config);

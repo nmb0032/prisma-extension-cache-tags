@@ -1,0 +1,231 @@
+# Configuration
+
+`createCacheTagsExtension(redisAdapter, config?)` accepts a `CacheTagsConfig`.
+The extension uses the defaults below when a field is omitted.
+
+## `CacheTagsConfig`
+
+| Name | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `enabled` | `boolean` | `true` | Enables or disables the extension globally. When disabled, the extension strips `cache` from arguments and runs the Prisma operation normally. |
+| `defaultTtlSeconds` | `number` | `30` | TTL used by a cached read when `cache.ttlSeconds` is omitted. |
+| `maxTtlSeconds` | `number` | `300` | Upper bound applied to every requested read TTL. |
+| `keyPrefix` | `string` | `'prismaCacheTags:v1'` | Prefix for query keys, tag-version keys, and stampede-lock keys. |
+| `cacheNull` | `boolean` | `true` | Allows `null` read results to be cached. |
+| `cacheEmpty` | `boolean` | `true` | Allows empty-array read results to be cached. |
+| `schemaVersion` | `number` | `1` | Adds a schema generation to cache identity. Bump it after a breaking change to cached shapes to invalidate every cache entry at once. |
+| `maxTagsPerQuery` | `number` | `30` | Maximum number of normalized tags retained for one read or write. |
+| `stampede` | `CacheStampedeOptions` | `{ waitMs: 1500, pollMs: 50, lockTtlMs: 5000 }` | Default distributed single-flight settings for cache misses. |
+| `dependencyTags` | `Record<string, string[] \| CacheDependencyResolver>` | `{}` | Adds model or custom tags to a write so related model reads are invalidated too. |
+| `inferTags` | `boolean` | `true` | Enables automatic tenant, model, and entity tag inference. |
+| `tenantKeys` | `string[]` | `[]` | Prisma argument property names that identify tenants. With no tenant keys, inferred tags use the `global:` namespace. |
+| `entityKeys` | `string[]` | `['id']` | Prisma argument property names that identify individual records. |
+| `logger` | `Logger` | No-op logger | Receives structured debug, info, warning, and error events. |
+| `metrics` | `Metrics` | No-op metrics sink | Receives cache hit and miss events through `onCacheEvent`. |
+
+### Tenant keys
+
+List every argument property that can scope a query to a tenant. The names are
+searched through Prisma `where` and write arguments, including nested relation
+filters.
+
+```ts
+import type { CacheTagsConfig } from 'prisma-extension-cache-tags';
+
+const config: CacheTagsConfig = {
+    tenantKeys: ['organizationId', 'accountId'],
+};
+```
+
+### Entity keys
+
+The default `['id']` adds record-level tags when an `id` is present. Add other
+unique identifiers when your application reads or writes records by them.
+
+```ts
+import type { CacheTagsConfig } from 'prisma-extension-cache-tags';
+
+const config: CacheTagsConfig = {
+    entityKeys: ['id', 'slug'],
+};
+```
+
+### Dependency tags
+
+An array maps a written model to related models whose model tags should also be
+invalidated. A resolver can return application-specific tags when the
+relationship needs more context.
+
+```ts
+import type { CacheDependencyResolver, CacheTagsConfig } from 'prisma-extension-cache-tags';
+
+const billingDependencyTags: CacheDependencyResolver = ({ tenantIds }) =>
+    tenantIds.map((tenantId) => `tenant:${tenantId}:billing`);
+
+const config: CacheTagsConfig = {
+    tenantKeys: ['organizationId'],
+    dependencyTags: {
+        Widget: ['Part'],
+        Invoice: billingDependencyTags,
+    },
+};
+```
+
+### Stampede protection
+
+On a miss, the first caller can acquire a Redis lock and populate the cache.
+Other callers poll for the value until `waitMs`; `lockTtlMs` should exceed the
+expected database query duration.
+
+```ts
+import type { CacheTagsConfig } from 'prisma-extension-cache-tags';
+
+const config: CacheTagsConfig = {
+    stampede: {
+        waitMs: 2_000,
+        pollMs: 100,
+        lockTtlMs: 10_000,
+    },
+};
+```
+
+### Schema version
+
+`schemaVersion` is part of both the generated key and the cached fingerprint.
+Bump it to invalidate every cache entry at once after a breaking change to
+cached shapes.
+
+```ts
+import type { CacheTagsConfig } from 'prisma-extension-cache-tags';
+
+const config: CacheTagsConfig = {
+    schemaVersion: 2,
+};
+```
+
+### Logger
+
+The logger receives `(data, message)` for each event. The default is a no-op,
+so logging is opt-in.
+
+```ts
+import type { CacheTagsConfig } from 'prisma-extension-cache-tags';
+
+const config: CacheTagsConfig = {
+    logger: {
+        debug(data, message) {
+            console.debug(message, data);
+        },
+        info(data, message) {
+            console.info(message, data);
+        },
+        warn(data, message) {
+            console.warn(message, data);
+        },
+        error(data, message) {
+            console.error(message, data);
+        },
+    },
+};
+```
+
+### Metrics
+
+The metrics sink receives `{ model, operation, result }`, where `result` is
+`'hit'` or `'miss'`. The default is a no-op.
+
+```ts
+import type { CacheTagsConfig } from 'prisma-extension-cache-tags';
+
+const config: CacheTagsConfig = {
+    metrics: {
+        onCacheEvent(event) {
+            console.log(`${event.model}.${event.operation}: ${event.result}`);
+        },
+    },
+};
+```
+
+## `CacheStampedeOptions`
+
+These fields can be set globally in `CacheTagsConfig.stampede` or overridden
+for one read with `CacheReadOptions.stampede`.
+
+| Name | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `waitMs` | `number` | `1500` | Maximum time a lock waiter polls for the owner to populate the cache. |
+| `pollMs` | `number` | `50` | Delay between waiter polls. |
+| `lockTtlMs` | `number` | `5000` | Redis lock lifetime; set it longer than the expected database query duration. |
+
+## `CacheReadOptions`
+
+Caching is opt-in: add a `cache` object to a supported read operation
+(`findUnique`, `findFirst`, `findMany`, `count`, `aggregate`, or `groupBy`).
+
+| Name | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `ttlSeconds` | `number` | `config.defaultTtlSeconds` | Requested cache TTL, clamped to `config.maxTtlSeconds`. |
+| `key` | `string` | Generated key | Uses a stable custom key while still incorporating schema and tag generations. |
+| `enabled` | `boolean` | `true` when `cache` is present | Set to `false` to bypass the cache for one read. |
+| `debug` | `boolean` | `false` | Emits debug hit, miss, and population messages through `logger`. |
+| `tags` | `string[]` | `[]` | Adds explicit invalidation tags. |
+| `inferTags` | `boolean` | `config.inferTags` (`true`) | Enables or disables inferred tenant, model, and entity tags for this read. |
+| `mergeTags` | `boolean` | `true` | When `true`, merges explicit tags with inferred tags; when `false`, explicit tags replace inferred tags. |
+| `stampede` | `CacheStampedeOptions` | `config.stampede` | Overrides lock wait, poll, and lock-TTL settings for this read. |
+
+```ts
+import type { CacheReadOptions } from 'prisma-extension-cache-tags';
+
+const readOptions: CacheReadOptions = {
+    ttlSeconds: 60,
+    key: 'widget-list',
+    tags: ['dashboard:org_123'],
+    debug: true,
+    inferTags: true,
+    mergeTags: true,
+    stampede: {
+        waitMs: 2_000,
+    },
+};
+```
+
+Use the options on a Prisma read:
+
+```ts
+const widgets = await prisma.widget.findMany({
+    where: { organizationId: 'org_123' },
+    cache: readOptions,
+});
+```
+
+## `CacheWriteOptions`
+
+Writes always run first. After a successful write, the extension invalidates
+the inferred and explicit tags. The `cache` object controls invalidation; it
+does not cache the write result.
+
+| Name | Type | Default | What it does |
+| --- | --- | --- | --- |
+| `tags` | `string[]` | `[]` | Adds explicit tags to the tags inferred from the write arguments. |
+| `debug` | `boolean` | `false` | Emits a debug message after publishing invalidation tags. |
+| `inferTags` | `boolean` | `config.inferTags` (`true`) | Enables or disables inferred tenant, model, and entity tags for this write. |
+| `mergeTags` | `boolean` | `true` | When `true`, merges explicit tags with inferred tags; when `false`, explicit tags replace inferred tags. |
+
+```ts
+import type { CacheWriteOptions } from 'prisma-extension-cache-tags';
+
+const writeOptions: CacheWriteOptions = {
+    tags: ['dashboard:org_123'],
+    debug: true,
+    inferTags: true,
+    mergeTags: true,
+};
+```
+
+```ts
+await prisma.widget.update({
+    where: { id: 'widget_1' },
+    data: { name: 'renamed' },
+    cache: writeOptions,
+});
+```

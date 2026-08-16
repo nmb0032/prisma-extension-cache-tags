@@ -38,12 +38,11 @@ export async function acquireCacheLock(
 
 export async function releaseCacheLock(lock: CacheLock, redisAdapter: RedisAdapter, config: NormalizedCacheConfig): Promise<void> {
     try {
-        if (redisAdapter.deleteIfValue) {
-            await redisAdapter.deleteIfValue(lock.key, lock.token);
+        if (!redisAdapter.deleteIfValue) {
             return;
         }
 
-        await redisAdapter.delete(lock.key);
+        await redisAdapter.deleteIfValue(lock.key, lock.token);
     } catch (error) {
         config.logger.warn({ key: lock.key, error: (error as Error).message }, 'Failed to release cache lock');
     }

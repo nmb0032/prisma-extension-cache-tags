@@ -56,6 +56,17 @@ describe('cache locks', () => {
         expect(redis.store.has(getCacheLockKey('key-1', config))).toBe(true);
     });
 
+    test('does not release a lock when conditional deletion is unavailable', async () => {
+        const lock = await acquireCacheLock('key-1', undefined, config, redis);
+        expect(lock).not.toBeNull();
+
+        const withoutDeleteIfValue = { ...redis, deleteIfValue: undefined };
+        await releaseCacheLock(lock!, withoutDeleteIfValue, config);
+
+        expect(redis.store.get(lock!.key)).toBe(lock!.token);
+        expect(redis.callCounts.delete ?? 0).toBe(0);
+    });
+
     test('returns null when the adapter cannot do conditional set', async () => {
         const withoutSetNx = { ...redis, setIfNotExists: undefined };
         expect(await acquireCacheLock('key-1', undefined, config, withoutSetNx)).toBeNull();

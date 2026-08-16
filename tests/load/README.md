@@ -21,8 +21,11 @@ Set `TEST_REDIS_URL` to use another Redis endpoint:
 TEST_REDIS_URL=redis://localhost:6380 pnpm test:load
 ```
 
-The harness uses `FLUSHDB` before and after each keyspace, so point it at a
-disposable Redis database.
+**Warning:** Run the harness only against a disposable Redis instance/database
+with no concurrent users. It unconditionally uses `FLUSHDB`, which deletes all
+keys in the selected database, and reads instance-wide Redis `commandstats`;
+concurrent clients can therefore lose data and corrupt the command-count
+measurements.
 
 The harness passes when p50 invalidation latency grows by no more than 2x
 across the 100x keyspace increase. It exits non-zero when that threshold is

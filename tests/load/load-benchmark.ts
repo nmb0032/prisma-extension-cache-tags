@@ -1,7 +1,9 @@
 import { BenchmarkMetrics } from './benchmark-metrics';
-import { createBenchmarkFixture, type BenchmarkFixture } from './benchmark-fixture';
+import { createBenchmarkFixture, deleteRedisNamespace, type BenchmarkFixture } from './benchmark-fixture';
 import { buildBenchmarkReportRow } from './benchmark-report';
 import { runModelWorkload, warmBenchmarkCache } from './model-workload';
+import { buildReadComparisonReportRow } from './read-comparison-report';
+import { runReadOnlyComparison } from './read-comparison';
 import { parseBenchmarkArgs, type BenchmarkProfileName } from './profiles';
 import {
     checkPostgresReachability,
@@ -90,6 +92,20 @@ async function main(): Promise<void> {
             printPreservedResources(fixture);
         }
 
+        const comparison = await runReadOnlyComparison(fixture, metrics);
+        console.log('Read-only cache comparison (same deterministic plan and concurrency):');
+        console.table([
+            comparison.phases.raw,
+            comparison.phases.cold,
+            comparison.phases.warm,
+        ].map(buildReadComparisonReportRow));
+
+        metrics.reset();
+        for (const queryCounter of fixture.queryCounters) {
+            queryCounter.reset();
+        }
+
+        await deleteRedisNamespace(fixture.redis, fixture.keyPrefix);
         await warmBenchmarkCache(fixture, profile);
         metrics.reset();
         for (const queryCounter of fixture.queryCounters) {

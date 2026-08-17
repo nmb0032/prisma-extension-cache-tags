@@ -51,11 +51,25 @@ pnpm test:benchmark:load -- --profile stress
 pnpm test:benchmark:load -- --preserve
 ```
 
-It reports throughput, p50/p95/p99 latency, cache hit rate, database query
-count, errors, and freshness failures. Performance measurements are
-informational and are not CI gates; workload errors and freshness failures
-still fail the command. Normal cleanup removes only the run-specific database
-rows and Redis namespace. `--preserve` skips cleanup and prints the run ID,
-tenant IDs, and Redis key prefix for inspection. Warm-up requests are sampled
-and bounded, and each benchmark Prisma client is capped at one PostgreSQL
-connection so the stress profile stays within its concurrency budget.
+It first reports a finite raw/cold/warm read-only comparison. The deterministic
+plan is built from the shared corpus and covers `Widget.findUnique`,
+`Part.findUnique`, `Widget.findMany`, and `Part.findMany`. Raw reads set
+`cache.enabled: false`; cold reads run once after clearing only the validated
+current-run namespace; warm reads repeat the exact plan without cleanup. The
+same client concurrency is used for every phase, results are checked by
+deterministic digest, and each row reports completed reads, elapsed time,
+throughput, p50/p95/p99 latency, cache hits/misses/hit rate, database queries,
+and speedup versus raw (`1.00x` for raw).
+
+The command then runs the existing blended 90% read / 10% write report, which
+continues to validate invalidation, distributed stampede behavior, and
+post-write freshness. Comparison counters are reset before that mixed report.
+The run namespace is also cleared before the existing mixed-workload warm-up,
+keeping its cache state independent of the comparison.
+Performance measurements are informational and are not CI gates or statistical
+claims; workload errors, digest mismatches, and freshness failures still fail
+the command. Normal cleanup removes only the run-specific database rows and
+Redis namespace. `--preserve` skips cleanup and prints the run ID, tenant IDs,
+and Redis key prefix for inspection. Warm-up requests are sampled and bounded,
+and each benchmark Prisma client is capped at one PostgreSQL connection so the
+stress profile stays within its concurrency budget.

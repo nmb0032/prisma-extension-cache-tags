@@ -38,13 +38,21 @@ pnpm test:benchmark:load
 ```
 
 The invalidation benchmark is a synthetic Redis keyspace-scaling check. The
-model-backed benchmark uses real cached Prisma `Widget` and `Part` unique/list
-operations against PostgreSQL and Redis, including cross-client cold-list and
-freshness checks. It defaults to the quick profile; use
-`pnpm test:benchmark:load -- --profile stress` for a larger, longer run.
-Benchmark performance is informational and is not a CI gate. Warm-up requests
-are sampled and bounded; each benchmark Prisma client uses one PostgreSQL
-connection so the stress profile remains within its concurrency budget.
+model-backed benchmark first compares raw cache-bypassed Prisma/Postgres reads,
+cold misses in an empty run namespace, and warm hits by repeating the exact
+same deterministic read plan and concurrency. It checks that all three result
+digests match and reports completed reads, throughput, latency percentiles,
+cache events, database queries, and speedup relative to raw. It then prints the
+existing blended 90% read / 10% write workload report for invalidation,
+distributed stampede behavior, and post-write freshness checks. It defaults to
+the quick profile; use `pnpm test:benchmark:load -- --profile stress` for a
+larger, longer run. Benchmark performance is informational, makes no
+statistical or CI-threshold claims, and correctness failures remain fatal.
+The comparison namespace is cleared before the existing mixed-workload warm-up,
+so its cache state and counters remain isolated from the comparison.
+Warm-up requests are sampled and bounded; each benchmark Prisma client uses one
+PostgreSQL connection so the stress profile remains within its concurrency
+budget.
 
 The model-backed benchmark cleans up only its run-specific database rows and
 Redis namespace by default; normal cleanup never flushes the Redis database.

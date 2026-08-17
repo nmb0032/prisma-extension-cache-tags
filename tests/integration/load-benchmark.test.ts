@@ -4,6 +4,7 @@ import { createTestPrismaClient } from '../fixture/client';
 import { BenchmarkMetrics } from '../load/benchmark-metrics';
 import { createBenchmarkFixture } from '../load/benchmark-fixture';
 import { runColdSharedListQuery, runModelWorkload, warmBenchmarkCache } from '../load/model-workload';
+import { runReadOnlyComparison } from '../load/read-comparison';
 import type { BenchmarkProfile } from '../load/profiles';
 import { closeTestRedisClient, createTestRedisClient } from '../support/service-preflight';
 
@@ -179,6 +180,52 @@ describe('isolated model-backed benchmark fixture', () => {
             expect(summary.databaseQueries).toBeGreaterThan(0);
             expect(summary.reads).toBeGreaterThan(0);
             expect(summary.writes).toBeGreaterThan(0);
+        } finally {
+            try {
+                await fixture.cleanup();
+            } finally {
+                await fixture.disconnect();
+            }
+        }
+    });
+
+    test('compares raw, cold, and warm reads with isolated cache namespace cleanup', async () => {
+        const metrics = new BenchmarkMetrics();
+        const comparisonProfile: BenchmarkProfile = {
+            ...profile,
+            widgetsPerTenant: 2,
+            partsPerWidget: 1,
+        };
+        const fixture = await createBenchmarkFixture(comparisonProfile, metrics, { runId: `comparison-${randomUUID()}` });
+        const staleKey = `${fixture.keyPrefix}:stale`;
+
+        try {
+            await fixture.redis.set(staleKey, 'remove');
+            const comparison = await runReadOnlyComparison(fixture, metrics);
+
+            expect(comparison.plan.some((operation) => operation.kind === 'widgetUnique')).toBe(true);
+            expect(comparison.plan.some((operation) => operation.kind === 'partUnique')).toBe(true);
+            expect(comparison.plan.some((operation) => operation.kind === 'widgetList')).toBe(true);
+            expect(comparison.plan.some((operation) => operation.kind === 'partList')).toBe(true);
+
+            const raw = comparison.phases.raw;
+            const cold = comparison.phases.cold;
+            const warm = comparison.phases.warm;
+            expect(raw.completedReads).toBe(comparison.plan.length);
+            expect(cold.completedReads).toBe(comparison.plan.length);
+            expect(warm.completedReads).toBe(comparison.plan.length);
+            expect(raw.cacheHits + raw.cacheMisses).toBe(0);
+            expect(raw.databaseQueries).toBe(comparison.plan.length);
+            expect(cold.cacheMisses).toBe(comparison.plan.length);
+            expect(cold.cacheHits).toBe(0);
+            expect(cold.databaseQueries).toBe(comparison.plan.length);
+            expect(warm.cacheHits).toBe(comparison.plan.length);
+            expect(warm.cacheMisses).toBe(0);
+            expect(warm.databaseQueries).toBe(0);
+            expect(raw.digest).toBe(cold.digest);
+            expect(cold.digest).toBe(warm.digest);
+            expect(await fixture.redis.get(staleKey)).toBeNull();
+            expect(await fixture.redis.get(unrelatedKey)).toBe('keep');
         } finally {
             try {
                 await fixture.cleanup();

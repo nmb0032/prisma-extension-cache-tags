@@ -122,21 +122,31 @@ pnpm test:benchmark:load -- --preserve
 
 `test:benchmark:invalidation` is a synthetic keyspace-scaling microbenchmark. It
 seeds synthetic cached-query keys and measures whether generational invalidation
-cost changes as the Redis keyspace grows. `test:benchmark:load` runs real Prisma
-`Widget` and `Part` unique/list reads and widget writes against PostgreSQL and
-Redis through the cache extension. It uses a shared read corpus to exercise
-distributed cold-list stampede protection and cross-client post-write freshness.
+cost changes as the Redis keyspace grows. `test:benchmark:load` first runs a
+finite, deterministic read-only comparison from the fixture's shared corpus.
+The raw phase bypasses the extension cache, the cold phase runs the same plan
+against an empty run namespace, and the warm phase repeats that plan without
+cleanup. All three phases use the same clients and concurrency, verify
+result-digest equivalence, and report throughput, latency percentiles, cache
+hits/misses, database queries, and speedup relative to raw (`1.00x` for raw).
+The command then prints the existing blended 90% read / 10% write report for
+invalidation, distributed stampede, and post-write freshness validation.
+The comparison namespace is cleared before that existing mixed-workload warm-up
+so its cache state and report remain isolated from the comparison.
+
 The `quick` profile is the default; `--profile stress` uses a larger dataset,
 more concurrency, and a longer measurement window for deliberate capacity
 investigations. Warm-up requests are sampled and bounded, and each benchmark
-Prisma client is capped at one PostgreSQL connection.
+Prisma client is capped at one PostgreSQL connection. Performance numbers are
+informational only, not statistical claims or CI thresholds; correctness
+failures remain fatal.
 
 The invalidation benchmark reports p50 and p99 invalidation latency by keyspace
-and verifies the expected Redis `INCRBY` count. The model-backed report includes
-throughput, p50/p95/p99 latency, cache hit rate, database query count, errors, and
-freshness failures. Performance numbers are informational only and are not CI
-gates; correctness failures, workload errors, and freshness failures still make
-the command fail.
+and verifies the expected Redis `INCRBY` count. The blended model-backed report
+continues to include throughput, p50/p95/p99 latency, cache hit rate, database
+query count, errors, and freshness failures. The preceding comparison has its
+own rows and counters, so its read-only measurements do not alter the mixed
+workload report.
 
 The model-backed benchmark normally removes only the current run's database rows
 and Redis namespace, and never flushes the Redis database. Pass `--preserve` to

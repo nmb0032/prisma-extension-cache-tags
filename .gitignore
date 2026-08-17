@@ -6,3 +6,4 @@ coverage/
 tests/fixture/generated/
 .env
 .superpowers/
+.comparison-implementation-report.md

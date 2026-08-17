@@ -73,6 +73,7 @@ export async function runReadOnlyComparison(
     metrics: BenchmarkMetrics,
 ): Promise<ReadOnlyComparison> {
     const plan = buildReadComparisonPlan(fixture.readCorpus);
+    await Promise.all(fixture.clients.map((client) => client.$connect()));
     const raw = await executeReadComparisonPhase(fixture, plan, 'raw', metrics);
 
     await deleteRedisNamespace(fixture.redis, fixture.keyPrefix);
@@ -135,6 +136,8 @@ async function executeReadComparisonPhase(
 
     const databaseQueries = fixture.queryCounters.reduce((total, counter) => total + counter.total, 0);
     metrics.addDatabaseQueries(databaseQueries);
+    const summary = metrics.summarize(elapsedMs);
+    assertReadComparisonPhaseInvariants(mode, plan.length, summary);
 
     return {
         digest: createReadComparisonDigest(
@@ -144,8 +147,52 @@ async function executeReadComparisonPhase(
                 result,
             })),
         ),
-        summary: metrics.summarize(elapsedMs),
+        summary,
     };
+}
+
+function assertReadComparisonPhaseInvariants(
+    mode: ReadComparisonMode,
+    expectedReads: number,
+    summary: ReturnType<BenchmarkMetrics['summarize']>,
+): void {
+    const expected = {
+        completedReads: expectedReads,
+        cacheHits: mode === 'warm' ? expectedReads : 0,
+        cacheMisses: mode === 'cold' ? expectedReads : 0,
+        databaseQueries: mode === 'warm' ? 0 : expectedReads,
+    };
+    const observed = {
+        completedReads: summary.reads,
+        cacheHits: summary.cacheHits,
+        cacheMisses: summary.cacheMisses,
+        databaseQueries: summary.databaseQueries,
+    };
+
+    if (
+        observed.completedReads !== expected.completedReads ||
+        observed.cacheHits !== expected.cacheHits ||
+        observed.cacheMisses !== expected.cacheMisses ||
+        observed.databaseQueries !== expected.databaseQueries
+    ) {
+        throw new Error(
+            `Read comparison ${mode} phase invariant failed: expected ${formatPhaseCounts(expected)}; observed ${formatPhaseCounts(observed)}`,
+        );
+    }
+}
+
+function formatPhaseCounts(counts: {
+    completedReads: number;
+    cacheHits: number;
+    cacheMisses: number;
+    databaseQueries: number;
+}): string {
+    return [
+        `completed reads=${counts.completedReads}`,
+        `cache hits=${counts.cacheHits}`,
+        `cache misses=${counts.cacheMisses}`,
+        `database queries=${counts.databaseQueries}`,
+    ].join(', ');
 }
 
 async function runReadComparisonWorker(

@@ -31,7 +31,7 @@
 ## Cross-Stage File Structure
 
 - `src/canonical.ts` — canonical Prisma-value encoding and SHA-256 query identity.
-- `src/serialization.ts` — flat v2 SuperJSON string wire format.
+- `src/serialization.ts` — flat v2 SuperJSON envelope with canonical identity, tenant scope, and value.
 - `src/keys.ts` — prepared base keys, tag-version tokens, fallback generation keys, and direct lock keys.
 - `src/optimized.ts` — optimized primitive types and extension-side orchestration.
 - `src/adapters/scripts.ts` — reusable EVALSHA load/retry executor.
@@ -376,6 +376,8 @@ export function hashCanonicalValue(value: unknown): string;
 export interface PreparedCacheKey {
     baseKey: string;
     tagVersionKeys: string[];
+    identity: string;
+    tenantScope: string[];
 }
 
 export function prepareCacheKey(
@@ -383,14 +385,23 @@ export function prepareCacheKey(
     operation: string,
     cleanedArgs: unknown,
     normalizedTags: string[],
+    tenantIds: string[],
     config: NormalizedCacheConfig,
     customKey?: string,
 ): PreparedCacheKey;
 
 export function createVersionToken(values: readonly (string | null)[]): string;
 export function buildVersionedCacheKey(baseKey: string, versionToken: string): string;
-export function serializeCachedValue(value: unknown): string;
-export function deserializeCachedValue(payload: string): unknown;
+
+export interface CachedEnvelopeV2 {
+    identity: string;
+    tenantScope: string[];
+    value: unknown;
+}
+
+export function serializeCacheEnvelope(envelope: CachedEnvelopeV2): string;
+export function deserializeCacheEnvelope(payload: string): CachedEnvelopeV2;
+export function matchesCacheIdentity(envelope: CachedEnvelopeV2, prepared: PreparedCacheKey): boolean;
 ```
 
 The v2 `RedisAdapter` required interface becomes:
@@ -453,7 +464,7 @@ Export `CanonicalizationError` with readonly `path` and `reason` fields. Unsuppo
 
 - [ ] **Step 4: Write flat serialization RED tests**
 
-Assert one string round trip and Prisma-value fidelity:
+Assert one string round trip, identity/scope retention, and Prisma-value fidelity:
 
 ```ts
 const value = {
@@ -461,9 +472,14 @@ const value = {
     bigint: 42n,
     nested: [undefined, Number.NaN, new Set(['a'])],
 };
-const payload = serializeCachedValue(value);
+const envelope = {
+    identity: 'canonical-query-identity',
+    tenantScope: ['tenant-a'],
+    value,
+};
+const payload = serializeCacheEnvelope(envelope);
 expect(typeof payload).toBe('string');
-expect(deserializeCachedValue(payload)).toEqual(value);
+expect(deserializeCacheEnvelope(payload)).toEqual(envelope);
 expect(payload).not.toContain('fingerprint');
 ```
 
@@ -482,12 +498,18 @@ Expected: FAIL because the v2 functions do not exist.
 Use exactly one SuperJSON stringify/parse pair:
 
 ```ts
-export function serializeCachedValue(value: unknown): string {
-    return superjson.stringify(value);
+export function serializeCacheEnvelope(envelope: CachedEnvelopeV2): string {
+    return superjson.stringify(envelope);
 }
 
-export function deserializeCachedValue(payload: string): unknown {
-    return superjson.parse(payload);
+export function deserializeCacheEnvelope(payload: string): CachedEnvelopeV2 {
+    return superjson.parse<CachedEnvelopeV2>(payload);
+}
+
+export function matchesCacheIdentity(envelope: CachedEnvelopeV2, prepared: PreparedCacheKey): boolean {
+    return envelope.identity === prepared.identity &&
+        envelope.tenantScope.length === prepared.tenantScope.length &&
+        envelope.tenantScope.every((tenantId, index) => tenantId === prepared.tenantScope[index]);
 }
 ```
 
@@ -506,7 +528,7 @@ expect(buildVersionedCacheKey('prismaCacheTags:v2:qry:Widget:findMany:abc', '0.2
 
 - [ ] **Step 8: Implement v2 key preparation and fallback generation**
 
-`prepareCacheKey` hashes `{ model, operation, args: cleanedArgs, schemaVersion }` once for normal reads. For custom keys it hashes `{ key: customKey, model, operation, args: cleanedArgs, schemaVersion }` and uses the `custom` namespace. Tags are already normalized and map directly to ordered tag-version keys. The fallback performs `mgetString`, creates the version token, and appends it to `baseKey`.
+Build one canonical identity from `{ model, operation, args: cleanedArgs, schemaVersion, tags: normalizedTags, customKey }`, omitting `customKey` when absent. Hash that exact identity once for `baseKey`, and retain it in `PreparedCacheKey.identity`. Sort and deduplicate `tenantIds` into `tenantScope`. Tags are already normalized and map directly to ordered tag-version keys. The fallback performs `mgetString`, creates the version token, and appends it to `baseKey`.
 
 Set `DEFAULT_CONFIG.keyPrefix` to `prismaCacheTags:v2`.
 
@@ -524,6 +546,7 @@ Refactor `readThroughCache` to receive:
 interface PreparedRead {
     cleanedArgs: unknown;
     normalizedTags: string[];
+    tenantScope: string[];
     preparedKey: PreparedCacheKey;
 }
 ```
@@ -536,7 +559,20 @@ Write a failing extension test with a cyclic or unsupported argument. Assert Pri
 
 Catch only `CanonicalizationError` around cache preparation. Log permanent argument incompatibilities at error level and invoke Prisma without caching. Propagate unrelated programming errors.
 
-- [ ] **Step 12: Remove `hash-object`**
+- [ ] **Step 12: Reject foreign identities and tenant scopes**
+
+Write failing unit and integration tests that:
+
+1. prepare the expected Redis generation key;
+2. manually store a valid SuperJSON envelope containing a different canonical identity and tenant scope plus another tenant's query result;
+3. execute the expected tenant's query;
+4. assert the foreign cached value is never returned, PostgreSQL executes once, the Redis entry is deleted, and metrics emit `{ result: 'bypass', path: 'fallback', reason: 'identity-mismatch' }`.
+
+Repeat the assertion through a custom key shared across different model, operation, arguments, normalized tags, and tenant scopes. The canonical identities and base keys must differ in every case.
+
+Implement identity verification immediately after every fallback cache read. On mismatch, log model/operation/cache key and expected/observed tenant scope without logging full query arguments, attempt deletion, emit the bypass metric, and query Prisma. If deletion fails, still query Prisma and surface the deletion failure through the configured logger.
+
+- [ ] **Step 13: Remove `hash-object`**
 
 Run:
 
@@ -546,7 +582,7 @@ pnpm remove hash-object
 
 Confirm `package.json`, `pnpm-lock.yaml`, source, tests, and built declarations contain no `hash-object` import.
 
-- [ ] **Step 13: Add v2 integration coverage**
+- [ ] **Step 14: Add v2 integration coverage**
 
 Test:
 
@@ -555,8 +591,9 @@ Test:
 - swapped argument order still produces one database query;
 - Date/BigInt result values retain their types;
 - write invalidation reaches v2 generations.
+- a valid foreign-tenant envelope under the expected v2 key is rejected and never returned.
 
-- [ ] **Step 14: Record CPU microbenchmarks**
+- [ ] **Step 15: Record CPU microbenchmarks**
 
 Add an ignored Stage 2 benchmark script or report section that compares 100,000 iterations of old representative behavior captured in the report against:
 
@@ -566,11 +603,11 @@ Add an ignored Stage 2 benchmark script or report section that compares 100,000 
 
 Do not keep legacy implementation code solely for benchmarking.
 
-- [ ] **Step 15: Run Stage 2 validation**
+- [ ] **Step 16: Run Stage 2 validation**
 
 Run unit, integration, typecheck, lint, build, E2E, quick benchmark, and the Stage 2 microbenchmarks. Record raw A/B drift, cache tables, CPU time, and package dependency diff in `stage-2-report.md`.
 
-- [ ] **Step 16: Commit Stage 2**
+- [ ] **Step 17: Commit Stage 2**
 
 ```bash
 git add src tests package.json pnpm-lock.yaml README.md docs
@@ -606,7 +643,7 @@ git commit -m "perf: add canonical v2 cache wire format"
 - Modify: `docs/how-invalidation-works.md`
 
 **Interfaces:**
-- Consumes Stage 2 `PreparedCacheKey`, raw string adapter, flat payload, and v2 generation-key helpers.
+- Consumes Stage 2 `PreparedCacheKey`, raw string adapter, verified flat envelope, and v2 generation-key helpers.
 - Produces:
 
 ```ts
@@ -732,7 +769,7 @@ Every script failure log includes `primitive`, `retry`, and the original error. 
 
 - [ ] **Step 9: Integrate optimized reads with fallback parity**
 
-When `adapter.optimized` exists, use `lookupVersioned`. When absent, use Stage 2 fallback generation, `getString`, and existing lock operations.
+When `adapter.optimized` exists, use `lookupVersioned`. When absent, use Stage 2 fallback generation, `getString`, and existing lock operations. Both paths must call `deserializeCacheEnvelope` and `matchesCacheIdentity` before emitting a hit or returning `envelope.value`; the Lua script returns an untrusted string, not a prevalidated value.
 
 Read-side optimized failure logs the primitive and uses the command fallback. Cache population failure returns the database result.
 

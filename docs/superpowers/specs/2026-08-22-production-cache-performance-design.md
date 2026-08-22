@@ -27,9 +27,11 @@ The work addresses three verified correctness and measurement defects before opt
 
 ### Canonical cache identity
 
-Remove the stored full-argument fingerprint from cache entries. The cache key already identifies model, operation, canonical arguments, schema version, and tag versions. Retaining a second, differently canonicalized identity check creates cache thrash while adding negligible collision protection.
+Remove the existing order-sensitive fingerprint implementation. It uses a different representation from the cache-key hash, so semantically identical calls can invalidate each other's entries.
 
-Until the v2 canonical serializer lands in Stage 2, Stage 1 must ensure every identity representation uses one canonical form. Alternating semantically identical arguments with different insertion order across independent clients must produce one database query and no cache deletion.
+Until the v2 canonical serializer lands in Stage 2, Stage 1 uses the cache key as its sole identity. Alternating semantically identical arguments with different insertion order across independent clients must produce one database query and no cache deletion.
+
+Stage 2 restores defense-in-depth correctly: one canonical identity representation drives both the key digest and the exact identity stored in the cache envelope. Every cache hit must verify the stored canonical identity and explicit tenant scope before returning the value.
 
 ### Write-side invalidation completeness
 
@@ -70,13 +72,34 @@ Hash the canonical bytes with Node's built-in SHA-256. The key uses a compact he
 
 Deterministic corpus tests and generated Prisma-shaped test values must cover equivalence and non-equivalence properties. `BigInt` arguments must cache successfully.
 
+The canonical query identity contains:
+
+- model;
+- operation;
+- cleaned Prisma arguments;
+- schema version;
+- normalized tag names;
+- the caller-provided custom key when present.
+
+Including normalized tag names prevents two different dependency/tag sets whose current versions happen to be equal from sharing a generation key. Custom keys remain names within the complete query identity; they never replace model, operation, arguments, tags, or tenant scope.
+
 ### Flat cache envelope
 
-Cache v2 stores one SuperJSON serialization of the query value in a flat envelope. It does not serialize a pre-serialized SuperJSON object or store full query arguments.
+Cache v2 stores one SuperJSON serialization of a flat envelope containing:
+
+- the exact canonical query identity used to produce the key digest;
+- the sorted, unique tenant scope resolved for the request;
+- the query value.
+
+It does not serialize a pre-serialized SuperJSON object. The full canonical identity is intentionally retained as defense-in-depth against digest collisions, custom-key aliasing, or a foreign/corrupt value stored under the correct Redis key.
+
+Every read path, including optimized Lua lookup, deserializes the envelope and compares both canonical identity and tenant scope before returning the value. A mismatch deletes the entry when possible, records an identity-mismatch cache bypass, and executes the Prisma query. It must never return the mismatched value.
 
 The adapter API exposes raw string reads and writes so the path does not perform `JSON.parse -> object traversal -> SuperJSON traversal`. Built-in node-redis and ioredis adapters implement the new interface directly.
 
-The cache prefix changes to `prismaCacheTags:v2`, isolating all v1 entries. Serialization fidelity tests cover Prisma-relevant values and confirm v1 data is ignored.
+The cache prefix changes to `prismaCacheTags:v2`, isolating all v1 entries. Serialization fidelity tests cover Prisma-relevant values and confirm v1 data is ignored. Collision tests place a valid foreign-tenant envelope under the expected Redis key and prove the extension deletes/bypasses it rather than returning its value.
+
+This protects against accidental collisions, stale foreign entries, and application-level key aliasing while Redis remains a trusted infrastructure dependency. A principal that can arbitrarily rewrite both envelope identity and value inside Redis is outside this package's threat model; defending against a compromised Redis service requires authenticated encryption or a secret MAC.
 
 ### Single-pass operation preparation
 
@@ -176,6 +199,7 @@ Quick benchmarks run after every stage. The stress benchmark establishes the ini
 
 - Canonicalization errors identify the unsupported value path and bypass caching without changing the Prisma result.
 - Permanent argument incompatibilities are logged as errors rather than silent warnings.
+- Canonical identity or tenant-scope mismatches are logged, measured, deleted when possible, and bypassed; the cached value is never returned.
 - Script errors include primitive name and retry state.
 - Read optimization failures safely bypass or use the command fallback.
 - Invalidation optimization failures use the command fallback and remain observable.
@@ -192,6 +216,9 @@ Required coverage includes:
 - tenant-precision writes exceeding the read tag limit;
 - A/B/A benchmark drift;
 - canonical encoding equivalence and non-equivalence;
+- exact canonical identity and tenant-scope verification on every read path;
+- simulated digest collision/foreign-tenant envelope rejection;
+- custom-key isolation across model, operation, arguments, tags, and tenants;
 - BigInt and Prisma-value serialization;
 - v1/v2 isolation;
 - optimized and fallback adapter parity;

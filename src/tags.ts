@@ -173,9 +173,10 @@ export function resolveCacheTags(
     const candidateTags = shouldMerge ? [...inferredTags, ...explicitTags] : explicitTags;
     const modelTag = createModelTag(model);
     const modelTagWasEmitted = shouldInfer && shouldMerge && inferredTags.includes(modelTag);
+    const maxTags = isReadOperation ? config.maxTagsPerQuery : Number.POSITIVE_INFINITY;
 
     return {
-        tags: normalizeTags(candidateTags, config.maxTagsPerQuery, modelTagWasEmitted ? modelTag : undefined),
+        tags: normalizeTags(candidateTags, maxTags, modelTagWasEmitted ? modelTag : undefined),
         tenantIds,
         entityIds,
     };

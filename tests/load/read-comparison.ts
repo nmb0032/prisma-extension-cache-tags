@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { deleteRedisNamespace, type BenchmarkFixture, type BenchmarkReadCorpus } from './benchmark-fixture';
 import { BenchmarkMetrics } from './benchmark-metrics';
 import {
+    calculateRawDriftPercent,
     createReadComparisonPhase,
+    isStableRawBaseline,
     type ReadComparisonMode,
     type ReadComparisonPhase,
 } from './read-comparison-report';
@@ -18,10 +20,14 @@ export type ReadComparisonOperation =
 
 export interface ReadOnlyComparison {
     plan: ReadComparisonOperation[];
+    warmupReads: number;
+    rawDriftPercent: number;
+    stableRawBaseline: boolean;
     phases: {
-        raw: ReadComparisonPhase;
+        rawA: ReadComparisonPhase;
         cold: ReadComparisonPhase;
         warm: ReadComparisonPhase;
+        rawB: ReadComparisonPhase;
     };
 }
 
@@ -61,7 +67,7 @@ export function createReadComparisonDigest(results: readonly unknown[]): string 
 export function assertReadComparisonEquivalent(
     expectedDigest: string,
     observedDigest: string,
-    mode: Exclude<ReadComparisonMode, 'raw'>,
+    mode: Exclude<ReadComparisonMode, 'rawA'>,
 ): void {
     if (expectedDigest !== observedDigest) {
         throw new Error(`Read comparison result mismatch in ${mode} phase`);
@@ -74,27 +80,76 @@ export async function runReadOnlyComparison(
 ): Promise<ReadOnlyComparison> {
     const plan = buildReadComparisonPlan(fixture.readCorpus);
     await Promise.all(fixture.clients.map((client) => client.$connect()));
-    const raw = await executeReadComparisonPhase(fixture, plan, 'raw', metrics);
+    const warmupReads = await executeReadComparisonWarmup(fixture, plan);
+    const rawA = await executeReadComparisonPhase(fixture, plan, 'rawA', metrics);
 
     await deleteRedisNamespace(fixture.redis, fixture.keyPrefix);
     const cold = await executeReadComparisonPhase(fixture, plan, 'cold', metrics);
     const warm = await executeReadComparisonPhase(fixture, plan, 'warm', metrics);
+    const rawB = await executeReadComparisonPhase(fixture, plan, 'rawB', metrics);
 
-    assertReadComparisonEquivalent(raw.digest, cold.digest, 'cold');
-    assertReadComparisonEquivalent(raw.digest, warm.digest, 'warm');
+    assertReadComparisonEquivalent(rawA.digest, cold.digest, 'cold');
+    assertReadComparisonEquivalent(rawA.digest, warm.digest, 'warm');
+    assertReadComparisonEquivalent(rawA.digest, rawB.digest, 'rawB');
 
-    const rawPhase = createReadComparisonPhase('raw', raw.summary, raw.digest, raw.summary.operationsPerSecond);
-    const coldPhase = createReadComparisonPhase('cold', cold.summary, cold.digest, raw.summary.operationsPerSecond);
-    const warmPhase = createReadComparisonPhase('warm', warm.summary, warm.digest, raw.summary.operationsPerSecond);
+    const rawDriftPercent = calculateRawDriftPercent(rawA.summary.operationsPerSecond, rawB.summary.operationsPerSecond);
+    const stableRawBaseline = isStableRawBaseline(rawA.summary.operationsPerSecond, rawB.summary.operationsPerSecond);
+    const rawOperationsPerSecond = stableRawBaseline
+        ? (rawA.summary.operationsPerSecond + rawB.summary.operationsPerSecond) / 2
+        : null;
+    const rawAPhase = createReadComparisonPhase('rawA', rawA.summary, rawA.digest, rawOperationsPerSecond);
+    const coldPhase = createReadComparisonPhase('cold', cold.summary, cold.digest, rawOperationsPerSecond);
+    const warmPhase = createReadComparisonPhase('warm', warm.summary, warm.digest, rawOperationsPerSecond);
+    const rawBPhase = createReadComparisonPhase('rawB', rawB.summary, rawB.digest, rawOperationsPerSecond);
 
     return {
         plan,
+        warmupReads,
+        rawDriftPercent,
+        stableRawBaseline,
         phases: {
-            raw: rawPhase,
+            rawA: rawAPhase,
             cold: coldPhase,
             warm: warmPhase,
+            rawB: rawBPhase,
         },
     };
+}
+
+async function executeReadComparisonWarmup(
+    fixture: BenchmarkFixture,
+    plan: readonly ReadComparisonOperation[],
+): Promise<number> {
+    if (fixture.clients.length === 0) {
+        throw new Error('The benchmark requires at least one independent client for read comparison');
+    }
+
+    const workerResults = await Promise.allSettled(
+        fixture.clients.map(async (client, workerIndex) => {
+            let completed = 0;
+            for (let index = workerIndex; index < plan.length; index += fixture.clients.length) {
+                await executeReadComparisonOperation(client, plan[index]!, 'warmup');
+                completed += 1;
+            }
+            return completed;
+        }),
+    );
+    const failures = workerResults.flatMap((result) => (result.status === 'rejected' ? [result.reason] : []));
+    if (failures.length === 1) {
+        throw failures[0];
+    }
+    if (failures.length > 1) {
+        throw new AggregateError(failures, 'warmup read comparison workers failed');
+    }
+
+    const completedReads = workerResults.reduce(
+        (total, result) => total + (result.status === 'fulfilled' ? result.value : 0),
+        0,
+    );
+    if (completedReads !== plan.length) {
+        throw new Error(`warmup read comparison completed ${completedReads} of ${plan.length} reads`);
+    }
+    return completedReads;
 }
 
 async function executeReadComparisonPhase(
@@ -224,9 +279,12 @@ async function runReadComparisonWorker(
 async function executeReadComparisonOperation(
     client: BenchmarkFixture['clients'][number],
     operation: ReadComparisonOperation,
-    mode: ReadComparisonMode,
+    mode: ReadComparisonMode | 'warmup',
 ): Promise<unknown> {
-    const cache = mode === 'raw' ? { enabled: false as const } : { ttlSeconds: CACHE_TTL_SECONDS };
+    const cache =
+        mode === 'warmup' || mode === 'rawA' || mode === 'rawB'
+            ? { enabled: false as const }
+            : { ttlSeconds: CACHE_TTL_SECONDS };
 
     switch (operation.kind) {
         case 'widgetUnique':

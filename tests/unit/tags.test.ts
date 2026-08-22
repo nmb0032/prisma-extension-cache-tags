@@ -156,6 +156,25 @@ describe('resolveCacheTags', () => {
 
             expect(overlappingTags(read.tags, write.tags).length).toBeGreaterThan(0);
         });
+
+        test('does not truncate write invalidation tags at the cached-read limit', () => {
+            const tenantIds = Array.from({ length: 20 }, (_, index) => `t${index}`);
+            const resolved = resolveCacheTags(
+                'Widget',
+                'updateMany',
+                { where: { tenantId: { in: tenantIds } }, data: { name: 'updated' } },
+                undefined,
+                makeConfig({
+                    tenantKeys: ['tenantId'],
+                    tenantPrecision: true,
+                    maxTagsPerQuery: 5,
+                }),
+                true,
+            );
+
+            expect(resolved.tags).toContain('tenant:t19:model:Widget');
+            expect(resolved.tags.length).toBeGreaterThan(5);
+        });
     });
 
     test('falls back to the global namespace when no tenantKeys are configured', () => {

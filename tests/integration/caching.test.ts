@@ -43,6 +43,26 @@ describe('read-through caching', () => {
         expect(counter.byModel.Widget).toBe(1);
     });
 
+    test('semantically equal filters share one cache entry across independent clients', async () => {
+        const counterA = createQueryCounter();
+        const counterB = createQueryCounter();
+        const podA = createCachedClient(redis, counterA);
+        const podB = createCachedClient(redis, counterB);
+        dependentClients.push(podA, podB);
+        await podA.widget.create({ data: { tenantId: 't1', name: 'widget' } });
+        counterA.reset();
+        counterB.reset();
+        const argsA = { where: { tenantId: 't1', name: 'widget' }, cache: { ttlSeconds: 60 } };
+        const argsB = { where: { name: 'widget', tenantId: 't1' }, cache: { ttlSeconds: 60 } };
+
+        await podA.widget.findMany(argsA);
+        for (let index = 0; index < 20; index += 1) {
+            await (index % 2 === 0 ? podB : podA).widget.findMany(index % 2 === 0 ? argsB : argsA);
+        }
+
+        expect(counterA.total + counterB.total).toBe(1);
+    });
+
     test('the cached result is structurally identical to the database result', async () => {
         await prisma.widget.create({ data: { tenantId: 't1', name: 'w1' } });
         counter.reset();
@@ -121,6 +141,43 @@ describe('read-through caching', () => {
         expect(afterDelete).toEqual([]);
         expect(otherAfterDelete).toHaveLength(1);
         expect(counter.byModel.Widget).toBe(6);
+    });
+
+    test('a tenant-precise write invalidates every resolved tenant beyond the cached-read tag limit', async () => {
+        const precise = createCachedClient(redis, counter, {
+            tenantPrecision: true,
+            maxTagsPerQuery: 5,
+        });
+        dependentClients.push(precise);
+        const tenantIds = Array.from({ length: 20 }, (_, index) => `truncation:t${index}`);
+        await precise.widget.createMany({
+            data: tenantIds.map((tenantId) => ({ tenantId, name: 'initial' })),
+        });
+
+        await Promise.all(
+            tenantIds.map((tenantId) =>
+                precise.widget.findMany({
+                    where: { tenantId },
+                    cache: { ttlSeconds: 60 },
+                }),
+            ),
+        );
+        await precise.widget.updateMany({
+            where: { tenantId: { in: tenantIds } },
+            data: { name: 'updated' },
+        });
+        const refreshed = await Promise.all(
+            tenantIds.map((tenantId) =>
+                precise.widget.findMany({
+                    where: { tenantId },
+                    cache: { ttlSeconds: 60 },
+                }),
+            ),
+        );
+
+        expect(refreshed).toHaveLength(20);
+        expect(refreshed.flat()).toHaveLength(20);
+        expect(refreshed.flat().every((widget) => widget.name === 'updated')).toBe(true);
     });
 
     test('dependency tags invalidate across models', async () => {

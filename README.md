@@ -70,13 +70,13 @@ warning. If the invariant is not guaranteed, keep the safe default.
 
 ## How invalidation works
 
-On a cached read, the extension infers tenant, model, and entity tags from the Prisma arguments. Configure argument names with `tenantKeys` and `entityKeys`, or add explicit `cache.tags` when a query needs a broader or custom scope. The default model-level fallback is retained whenever it is emitted, even when `maxTagsPerQuery` truncates the tag list.
+On a cached read, the extension infers tenant, model, and entity tags from the Prisma arguments. Configure argument names with `tenantKeys` and `entityKeys`, or add explicit `cache.tags` when a query needs a broader or custom scope. The default model-level fallback is retained whenever it is emitted, even when `maxTagsPerQuery` truncates a read's tag list. The limit never truncates write invalidation tags.
 
 Each tag has a Redis version counter, and the current counter values are folded into the cache key. A read therefore selects the current generation without maintaining a list of every key that carries the tag.
 
 A successful write increments the affected counters, so old cache keys become unreachable immediately and expire on their own TTL. Interactive transactions defer those increments until commit; a rollback does not invalidate the previous generation.
 
-Read the [detailed invalidation explanation](docs/how-invalidation-works.md) for the key, fingerprint, and transaction details.
+Read the [detailed invalidation explanation](docs/how-invalidation-works.md) for key generation and transaction details.
 
 ## Requirements
 
@@ -122,17 +122,22 @@ pnpm test:benchmark:load -- --preserve
 
 `test:benchmark:invalidation` is a synthetic keyspace-scaling microbenchmark. It
 seeds synthetic cached-query keys and measures whether generational invalidation
-cost changes as the Redis keyspace grows. `test:benchmark:load` first runs a
-finite, deterministic read-only comparison from the fixture's shared corpus.
-The raw phase bypasses the extension cache, the cold phase runs the same plan
-against an empty run namespace, and the warm phase repeats that plan without
-cleanup. All three phases use the same clients and concurrency, verify
-result-digest equivalence, and report throughput, latency percentiles, cache
-hits/misses, database queries, and speedup relative to raw (`1.00x` for raw).
-The command then prints the existing blended 90% read / 10% write report for
-invalidation, distributed stampede, and post-write freshness validation.
-The comparison namespace is cleared before that existing mixed-workload warm-up
-so its cache state and report remain isolated from the comparison.
+cost changes as the Redis keyspace grows. `test:benchmark:load` first discards an
+untimed raw warm-up, then runs raw A, cold, warm, and raw B samples over one
+finite deterministic plan from the fixture's shared corpus. Cold starts after
+clearing the run namespace; warm repeats without cleanup. Every measured phase
+uses the same clients and concurrency, verifies result-digest equivalence, and
+reports throughput, latency percentiles, cache hits/misses, and database queries.
+The report shows symmetric raw A/B drift. When drift is at most 10%, speedups use
+the arithmetic mean of both raw samples; otherwise they render as `unstable`.
+
+The load benchmark also synchronizes 32 independent clients on one cold key.
+Quick runs use 10 rounds and stress runs use 30, reporting one database-query
+count per round plus winner and loser p50/p95/p99 latency. It then prints the
+existing blended 90% read / 10% write report for invalidation, distributed
+stampede, and post-write freshness validation. The comparison namespace is
+cleared before that mixed-workload warm-up so its cache state and report remain
+isolated from the comparison.
 
 The `quick` profile is the default; `--profile stress` uses a larger dataset,
 more concurrency, and a longer measurement window for deliberate capacity
@@ -146,7 +151,8 @@ and verifies the expected Redis `INCRBY` count. The blended model-backed report
 continues to include throughput, p50/p95/p99 latency, cache hit rate, database
 query count, errors, and freshness failures. The preceding comparison has its
 own rows and counters, so its read-only measurements do not alter the mixed
-workload report.
+workload report. Redis command counts and Node event-loop utilization are not
+yet instrumented for the model-backed phases.
 
 The model-backed benchmark normally removes only the current run's database rows
 and Redis namespace, and never flushes the Redis database. Pass `--preserve` to

@@ -51,15 +51,23 @@ pnpm test:benchmark:load -- --profile stress
 pnpm test:benchmark:load -- --preserve
 ```
 
-It first reports a finite raw/cold/warm read-only comparison. The deterministic
-plan is built from the shared corpus and covers `Widget.findUnique`,
-`Part.findUnique`, `Widget.findMany`, and `Part.findMany`. Raw reads set
-`cache.enabled: false`; cold reads run once after clearing only the validated
-current-run namespace; warm reads repeat the exact plan without cleanup. The
-same client concurrency is used for every phase, results are checked by
-deterministic digest, and each row reports completed reads, elapsed time,
-throughput, p50/p95/p99 latency, cache hits/misses/hit rate, database queries,
-and speedup versus raw (`1.00x` for raw).
+It first discards one untimed raw warm-up and then reports finite raw A, cold,
+warm, and raw B phases. The deterministic plan is built from the shared corpus
+and covers `Widget.findUnique`, `Part.findUnique`, `Widget.findMany`, and
+`Part.findMany`. Raw reads set `cache.enabled: false`; cold reads run once after
+clearing only the validated current-run namespace; warm reads repeat the exact
+plan without cleanup. The same client concurrency is used for every measured
+phase, results are checked by deterministic digest, and each row reports
+completed reads, elapsed time, throughput, p50/p95/p99 latency, cache
+hits/misses/hit rate, and database queries. The report calculates symmetric raw
+A/B drift. At no more than 10% drift, speedups use the mean raw throughput;
+otherwise comparative speedups render as `unstable`.
+
+Next, 32 independent clients start the same cold-key read behind a shared
+barrier. Quick runs execute 10 rounds and stress runs execute 30. Each round
+must issue exactly one database query and return equal results. The report
+separates the fastest request in each round as the winner sample and reports
+p50/p95/p99 for winners and the remaining loser samples.
 
 The command then runs the existing blended 90% read / 10% write report, which
 continues to validate invalidation, distributed stampede behavior, and
@@ -72,4 +80,5 @@ the command. Normal cleanup removes only the run-specific database rows and
 Redis namespace. `--preserve` skips cleanup and prints the run ID, tenant IDs,
 and Redis key prefix for inspection. Warm-up requests are sampled and bounded,
 and each benchmark Prisma client is capped at one PostgreSQL connection so the
-stress profile stays within its concurrency budget.
+stress profile stays within its concurrency budget. Redis command counts and
+Node event-loop utilization are not yet instrumented for model-backed phases.

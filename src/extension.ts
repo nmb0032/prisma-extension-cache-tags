@@ -10,7 +10,7 @@ import { Prisma } from '@prisma/client/extension';
 import hash from 'hash-object';
 import { normalizeConfig } from './config';
 import { bumpTagVersions, publishInvalidation, runWithInvalidationContext } from './invalidation';
-import { computeFingerprint, generateCacheKey, getTagVersions } from './keys';
+import { generateCacheKey, getTagVersions } from './keys';
 import { acquireCacheLock, releaseCacheLock, waitForCachedValue } from './locks';
 import { deserializeCachedValue, deserializeCacheEnvelope, serializeCacheEnvelope } from './serialization';
 import { resolveCacheTags } from './tags';
@@ -71,11 +71,6 @@ async function generateCustomCacheKey(
 
 async function tryGetCachedValue(
     cacheKey: string,
-    model: string,
-    operation: string,
-    args: unknown,
-    tags: string[],
-    config: NormalizedCacheConfig,
     redisAdapter: RedisAdapter,
 ): Promise<unknown | undefined> {
     const cachedSuperJson = await redisAdapter.get<ReturnType<typeof serializeCacheEnvelope>>(cacheKey);
@@ -84,15 +79,7 @@ async function tryGetCachedValue(
     }
 
     const cached = deserializeCacheEnvelope(cachedSuperJson);
-    const currentFingerprint = computeFingerprint(model, operation, args, tags, config);
-
-    if (cached.fingerprint === currentFingerprint) {
-        return deserializeCachedValue(cached);
-    }
-
-    config.logger.warn({ model, operation, cacheKey }, 'Cache fingerprint mismatch; deleting cache entry and treating as miss');
-    await redisAdapter.delete(cacheKey);
-    return undefined;
+    return deserializeCachedValue(cached);
 }
 
 export async function readThroughCache(params: {
@@ -123,7 +110,7 @@ export async function readThroughCache(params: {
         return query(cleanedArgs);
     }
 
-    const getCachedValue = () => tryGetCachedValue(cacheKey, model, operation, args, resolvedTags.tags, config, redisAdapter);
+    const getCachedValue = () => tryGetCachedValue(cacheKey, redisAdapter);
 
     try {
         const cachedValue = await getCachedValue();
@@ -180,7 +167,7 @@ export async function readThroughCache(params: {
             try {
                 await redisAdapter.set(
                     cacheKey,
-                    serializeCacheEnvelope(result, computeFingerprint(model, operation, args, resolvedTags.tags, config)),
+                    serializeCacheEnvelope(result),
                     ttlSeconds,
                 );
                 if (cacheOptions.debug) {

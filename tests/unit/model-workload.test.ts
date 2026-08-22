@@ -61,6 +61,7 @@ function createFixture(
     return {
         runId: 'model-workload-unit',
         keyPrefix: 'prismaCacheTags:benchmark:model-workload-unit',
+        profileName: 'quick',
         tenantIds: ['tenant-0'],
         widgetsByWorker: [[widget], [secondWidget]],
         coldListProbeCompleted: true,

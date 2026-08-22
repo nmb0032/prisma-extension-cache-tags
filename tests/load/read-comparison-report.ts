@@ -1,6 +1,6 @@
 import type { BenchmarkSummary } from './benchmark-metrics';
 
-export type ReadComparisonMode = 'raw' | 'cold' | 'warm';
+export type ReadComparisonMode = 'rawA' | 'cold' | 'warm' | 'rawB';
 
 export interface ReadComparisonPhase {
     mode: ReadComparisonMode;
@@ -15,7 +15,7 @@ export interface ReadComparisonPhase {
     cacheMisses: number;
     cacheHitRate: number;
     databaseQueries: number;
-    speedupVsRaw: number;
+    speedupVsRaw: number | null;
 }
 
 export type ReadComparisonReportRow = {
@@ -37,9 +37,9 @@ export function createReadComparisonPhase(
     mode: ReadComparisonMode,
     summary: BenchmarkSummary,
     digest: string,
-    rawOperationsPerSecond: number,
+    rawOperationsPerSecond: number | null,
 ): ReadComparisonPhase {
-    if (!Number.isFinite(rawOperationsPerSecond) || rawOperationsPerSecond <= 0) {
+    if (rawOperationsPerSecond !== null && (!Number.isFinite(rawOperationsPerSecond) || rawOperationsPerSecond <= 0)) {
         throw new Error('rawOperationsPerSecond must be greater than 0');
     }
 
@@ -56,8 +56,17 @@ export function createReadComparisonPhase(
         cacheMisses: summary.cacheMisses,
         cacheHitRate: summary.cacheHitRate,
         databaseQueries: summary.databaseQueries,
-        speedupVsRaw: mode === 'raw' ? 1 : summary.operationsPerSecond / rawOperationsPerSecond,
+        speedupVsRaw: rawOperationsPerSecond === null ? null : summary.operationsPerSecond / rawOperationsPerSecond,
     };
+}
+
+export function calculateRawDriftPercent(rawAOps: number, rawBOps: number): number {
+    const midpoint = (rawAOps + rawBOps) / 2;
+    return midpoint === 0 ? 0 : (Math.abs(rawAOps - rawBOps) / midpoint) * 100;
+}
+
+export function isStableRawBaseline(rawAOps: number, rawBOps: number): boolean {
+    return calculateRawDriftPercent(rawAOps, rawBOps) <= 10;
 }
 
 export function buildReadComparisonReportRow(phase: ReadComparisonPhase): ReadComparisonReportRow {
@@ -66,7 +75,7 @@ export function buildReadComparisonReportRow(phase: ReadComparisonPhase): ReadCo
         'completed reads': phase.completedReads,
         'elapsed (ms)': phase.elapsedMs.toFixed(2),
         'ops/sec': phase.operationsPerSecond.toFixed(1),
-        'speedup vs raw': `${phase.speedupVsRaw.toFixed(2)}x`,
+        'speedup vs raw': phase.speedupVsRaw === null ? 'unstable' : `${phase.speedupVsRaw.toFixed(2)}x`,
         'p50 (ms)': phase.p50Ms.toFixed(2),
         'p95 (ms)': phase.p95Ms.toFixed(2),
         'p99 (ms)': phase.p99Ms.toFixed(2),

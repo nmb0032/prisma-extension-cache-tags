@@ -1,5 +1,4 @@
 import hash from 'hash-object';
-import { stableStringify } from './serialization';
 import { normalizeTags } from './tags';
 import type { NormalizedCacheConfig, RedisAdapter } from './types';
 
@@ -18,16 +17,6 @@ export function getTagVersionKey(tag: string, config: NormalizedCacheConfig): st
 
 export function getCacheLockKey(cacheKey: string, config: NormalizedCacheConfig): string {
     return `${config.keyPrefix}:lock:${hash({ cacheKey })}`;
-}
-
-export function computeFingerprint(model: string, operation: string, args: unknown, tags: string[], config: NormalizedCacheConfig): string {
-    return stableStringify({
-        model,
-        operation,
-        args: removeCacheFromArgs(args),
-        tags: normalizeTags(tags, config.maxTagsPerQuery),
-        schemaVersion: config.schemaVersion,
-    });
 }
 
 export async function getTagVersions(

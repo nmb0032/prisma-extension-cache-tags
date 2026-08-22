@@ -1,10 +1,11 @@
 import { BenchmarkMetrics } from './benchmark-metrics';
 import { createBenchmarkFixture, deleteRedisNamespace, type BenchmarkFixture } from './benchmark-fixture';
 import { buildBenchmarkReportRow } from './benchmark-report';
+import { runColdKeyContention, type ContentionBenchmarkResult } from './contention-benchmark';
 import { runModelWorkload, warmBenchmarkCache } from './model-workload';
 import { buildReadComparisonReportRow } from './read-comparison-report';
 import { runReadOnlyComparison } from './read-comparison';
-import { parseBenchmarkArgs, type BenchmarkProfileName } from './profiles';
+import { parseBenchmarkArgs, type BenchmarkProfile, type BenchmarkProfileName } from './profiles';
 import {
     checkPostgresReachability,
     ensureFixtureSchema,
@@ -71,6 +72,40 @@ function printBenchmarkReport(profile: BenchmarkProfileName, metrics: BenchmarkM
     return summary;
 }
 
+function printContentionReport(result: ContentionBenchmarkResult): void {
+    console.log(`Cold-key contention (${result.contenders} contenders, ${result.rounds} rounds):`);
+    console.log(`Database queries per round: ${result.databaseQueriesPerRound.join(', ')}`);
+    console.table([
+        {
+            cohort: 'winner',
+            samples: result.rounds,
+            'p50 (ms)': result.winner.p50Ms.toFixed(2),
+            'p95 (ms)': result.winner.p95Ms.toFixed(2),
+            'p99 (ms)': result.winner.p99Ms.toFixed(2),
+        },
+        {
+            cohort: 'losers',
+            samples: result.rounds * (result.contenders - 1),
+            'p50 (ms)': result.losers.p50Ms.toFixed(2),
+            'p95 (ms)': result.losers.p95Ms.toFixed(2),
+            'p99 (ms)': result.losers.p99Ms.toFixed(2),
+        },
+    ]);
+}
+
+function createContentionProfile(profile: BenchmarkProfile): BenchmarkProfile {
+    return {
+        ...profile,
+        tenants: 1,
+        widgetsPerTenant: 1,
+        partsPerWidget: 0,
+        concurrency: 32,
+        warmupMs: 0,
+        durationMs: 1,
+        readRatio: 1,
+    };
+}
+
 async function main(): Promise<void> {
     const args = process.argv.slice(2);
     const { profile, preserve } = parseBenchmarkArgs(args[0] === '--' ? args.slice(1) : args);
@@ -80,6 +115,7 @@ async function main(): Promise<void> {
 
     const metrics = new BenchmarkMetrics();
     const fixture = await createBenchmarkFixture(profile, metrics, { preserve });
+    let contentionFixture: BenchmarkFixture | undefined;
     let primaryFailed = false;
     let primaryError: unknown;
     let measurementStartedAt: bigint | undefined;
@@ -93,12 +129,31 @@ async function main(): Promise<void> {
         }
 
         const comparison = await runReadOnlyComparison(fixture, metrics);
-        console.log('Read-only cache comparison (same deterministic plan and concurrency):');
+        console.log(`Discarded read warm-up: ${comparison.warmupReads} reads`);
+        console.log(
+            `Raw A/B drift: ${comparison.rawDriftPercent.toFixed(2)}% (${comparison.stableRawBaseline ? 'stable' : 'unstable'}; stable <= 10.00%)`,
+        );
+        console.log('Read-only cache comparison (same deterministic plan and concurrency; raw baseline is A/B mean when stable):');
         console.table([
-            comparison.phases.raw,
+            comparison.phases.rawA,
             comparison.phases.cold,
             comparison.phases.warm,
+            comparison.phases.rawB,
         ].map(buildReadComparisonReportRow));
+
+        const contentionTarget =
+            fixture.clients.length >= 32
+                ? fixture
+                : (contentionFixture = await createBenchmarkFixture(
+                      createContentionProfile(profile),
+                      new BenchmarkMetrics(),
+                      { preserve },
+                  ));
+        if (preserve && contentionFixture) {
+            console.log('Contention fixture resources:');
+            printPreservedResources(contentionFixture);
+        }
+        printContentionReport(await runColdKeyContention(contentionTarget));
 
         metrics.reset();
         for (const queryCounter of fixture.queryCounters) {
@@ -137,16 +192,26 @@ async function main(): Promise<void> {
             }
         }
 
-        try {
-            await fixture.cleanup();
-        } catch (error) {
-            failures.push(error);
+        for (const resource of [contentionFixture, fixture]) {
+            if (!resource) {
+                continue;
+            }
+            try {
+                await resource.cleanup();
+            } catch (error) {
+                failures.push(error);
+            }
         }
 
-        try {
-            await fixture.disconnect();
-        } catch (error) {
-            failures.push(error);
+        for (const resource of [contentionFixture, fixture]) {
+            if (!resource) {
+                continue;
+            }
+            try {
+                await resource.disconnect();
+            } catch (error) {
+                failures.push(error);
+            }
         }
 
         if (failures.length === 1) {

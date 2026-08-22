@@ -62,7 +62,23 @@ describe('read-only cache comparison planning', () => {
         expect(Math.max(...connectionIndexes)).toBeLessThan(firstReadIndex);
     });
 
-    test.each(['raw', 'cold', 'warm'] as const)(
+    test('executes discarded warm-up, raw A, cold, warm, and raw B in order', async () => {
+        const events: string[] = [];
+        const metrics = new BenchmarkMetrics();
+        const fixture = createFakeComparisonFixture({ events, metrics });
+
+        const comparison = await runReadOnlyComparison(fixture, metrics);
+        const phaseOrder = events
+            .filter((event) => event.startsWith('phase:') || event === 'clear')
+            .filter((event, index, all) => index === 0 || event !== all[index - 1])
+            .map((event) => event.replace('phase:', ''));
+
+        expect(phaseOrder).toEqual(['warmup', 'rawA', 'clear', 'cold', 'warm', 'rawB']);
+        expect(comparison.warmupReads).toBe(comparison.plan.length);
+        expect(Object.keys(comparison.phases)).toEqual(['rawA', 'cold', 'warm', 'rawB']);
+    });
+
+    test.each(['rawA', 'cold', 'warm', 'rawB'] as const)(
         'fails when the %s phase violates its finite-plan cache invariant',
         async (invalidMode) => {
             const metrics = new BenchmarkMetrics();
@@ -94,6 +110,7 @@ function createFakeComparisonFixture(options: FakeComparisonFixtureOptions = {})
     };
     const planLength = buildReadComparisonPlan(corpus).length;
     let enabledReadCount = 0;
+    let disabledReadCount = 0;
     const queryCounters = Array.from({ length: clientCount }, () => ({
         total: 0,
         byModel: {} as Record<string, number>,
@@ -106,11 +123,20 @@ function createFakeComparisonFixture(options: FakeComparisonFixtureOptions = {})
     const clients = queryCounters.map((queryCounter, clientIndex) => {
         const read = async (operation: ReadComparisonOperation, args: { cache?: { enabled?: boolean } }): Promise<unknown> => {
             events.push(`read:${clientIndex}`);
-            const mode: ReadComparisonMode =
-                args.cache?.enabled === false ? 'raw' : enabledReadCount++ < planLength ? 'cold' : 'warm';
+            const mode: ReadComparisonMode | 'warmup' =
+                args.cache?.enabled === false
+                    ? disabledReadCount++ < planLength
+                        ? 'warmup'
+                        : disabledReadCount <= planLength * 2
+                          ? 'rawA'
+                          : 'rawB'
+                    : enabledReadCount++ < planLength
+                      ? 'cold'
+                      : 'warm';
+            events.push(`phase:${mode}`);
             const shouldInvalidate = options.invalidMode === mode;
 
-            if (mode === 'raw') {
+            if (mode === 'warmup' || mode === 'rawA' || mode === 'rawB') {
                 if (shouldInvalidate) {
                     metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findUnique', result: 'miss' });
                 }
@@ -161,6 +187,7 @@ function createFakeComparisonFixture(options: FakeComparisonFixtureOptions = {})
     return {
         runId: 'unit',
         keyPrefix: 'prismaCacheTags:benchmark:unit',
+        profileName: 'quick',
         tenantIds: corpus.tenantIds,
         widgetsByWorker: [corpus.widgets],
         readCorpus: corpus,
@@ -169,6 +196,7 @@ function createFakeComparisonFixture(options: FakeComparisonFixtureOptions = {})
         queryCounters,
         redis: {
             async *scanIterator(): AsyncGenerator<string[]> {
+                events.push('clear');
                 return;
             },
             unlink: async () => 0,

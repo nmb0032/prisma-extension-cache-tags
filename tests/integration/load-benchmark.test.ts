@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { createTestPrismaClient } from '../fixture/client';
 import { BenchmarkMetrics } from '../load/benchmark-metrics';
 import { createBenchmarkFixture } from '../load/benchmark-fixture';
+import { runColdKeyContention } from '../load/contention-benchmark';
 import { runColdSharedListQuery, runModelWorkload, warmBenchmarkCache } from '../load/model-workload';
 import { runReadOnlyComparison } from '../load/read-comparison';
 import type { BenchmarkProfile } from '../load/profiles';
@@ -189,7 +190,7 @@ describe('isolated model-backed benchmark fixture', () => {
         }
     });
 
-    test('compares raw, cold, and warm reads with isolated cache namespace cleanup', async () => {
+    test('compares raw A, cold, warm, and raw B reads with isolated cache namespace cleanup', async () => {
         const metrics = new BenchmarkMetrics();
         const comparisonProfile: BenchmarkProfile = {
             ...profile,
@@ -208,24 +209,61 @@ describe('isolated model-backed benchmark fixture', () => {
             expect(comparison.plan.some((operation) => operation.kind === 'widgetList')).toBe(true);
             expect(comparison.plan.some((operation) => operation.kind === 'partList')).toBe(true);
 
-            const raw = comparison.phases.raw;
+            const rawA = comparison.phases.rawA;
             const cold = comparison.phases.cold;
             const warm = comparison.phases.warm;
-            expect(raw.completedReads).toBe(comparison.plan.length);
+            const rawB = comparison.phases.rawB;
+            expect(comparison.warmupReads).toBe(comparison.plan.length);
+            expect(rawA.completedReads).toBe(comparison.plan.length);
             expect(cold.completedReads).toBe(comparison.plan.length);
             expect(warm.completedReads).toBe(comparison.plan.length);
-            expect(raw.cacheHits + raw.cacheMisses).toBe(0);
-            expect(raw.databaseQueries).toBe(comparison.plan.length);
+            expect(rawB.completedReads).toBe(comparison.plan.length);
+            expect(rawA.cacheHits + rawA.cacheMisses).toBe(0);
+            expect(rawA.databaseQueries).toBe(comparison.plan.length);
             expect(cold.cacheMisses).toBe(comparison.plan.length);
             expect(cold.cacheHits).toBe(0);
             expect(cold.databaseQueries).toBe(comparison.plan.length);
             expect(warm.cacheHits).toBe(comparison.plan.length);
             expect(warm.cacheMisses).toBe(0);
             expect(warm.databaseQueries).toBe(0);
-            expect(raw.digest).toBe(cold.digest);
+            expect(rawB.cacheHits + rawB.cacheMisses).toBe(0);
+            expect(rawB.databaseQueries).toBe(comparison.plan.length);
+            expect(rawA.digest).toBe(cold.digest);
             expect(cold.digest).toBe(warm.digest);
+            expect(warm.digest).toBe(rawB.digest);
+            expect(comparison.rawDriftPercent).toBeGreaterThanOrEqual(0);
+            expect(typeof comparison.stableRawBaseline).toBe('boolean');
             expect(await fixture.redis.get(staleKey)).toBeNull();
             expect(await fixture.redis.get(unrelatedKey)).toBe('keep');
+        } finally {
+            try {
+                await fixture.cleanup();
+            } finally {
+                await fixture.disconnect();
+            }
+        }
+    });
+
+    test('serves 32 simultaneous cold-key contenders with one database query per round', async () => {
+        const contentionProfile: BenchmarkProfile = {
+            ...profile,
+            tenants: 1,
+            widgetsPerTenant: 2,
+            partsPerWidget: 0,
+            concurrency: 32,
+        };
+        const fixture = await createBenchmarkFixture(contentionProfile, new BenchmarkMetrics(), {
+            runId: `contention-${randomUUID()}`,
+        });
+
+        try {
+            const result = await runColdKeyContention(fixture, 32);
+
+            expect(result.rounds).toBe(10);
+            expect(result.contenders).toBe(32);
+            expect(result.databaseQueriesPerRound).toEqual(Array.from({ length: 10 }, () => 1));
+            expect(result.winner.p50Ms).toBeGreaterThan(0);
+            expect(result.losers.p50Ms).toBeGreaterThan(0);
         } finally {
             try {
                 await fixture.cleanup();

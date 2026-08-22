@@ -2,11 +2,8 @@ import type { Prisma } from '@prisma/client/extension';
 import type { Operation } from '@prisma/client/runtime/client';
 import type superjson from 'superjson';
 
-/**
- * Cached value envelope that includes fingerprint for validation
- */
+/** Cached value envelope. */
 export interface CachedEnvelope {
-    fingerprint: string;
     value: ReturnType<typeof superjson.serialize>;
 }
 
@@ -223,7 +220,7 @@ export interface CacheTagsConfig {
     cacheEmpty?: boolean;
     /** Bump to invalidate every cache entry after a breaking code change (default: 1) */
     schemaVersion?: number;
-    /** Maximum number of tags allowed per query (default: 30) */
+    /** Maximum number of tags included in a cached read key (default: 30). Never limits write invalidation. */
     maxTagsPerQuery?: number;
     /** Default stampede protection behaviour */
     stampede?: CacheStampedeOptions;

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import { computeFingerprint, generateCacheKey, getTagVersionKey } from '../../src/keys';
+import { generateCacheKey, getTagVersionKey } from '../../src/keys';
 import { noopLogger, noopMetrics } from '../../src/observability';
 import type { NormalizedCacheConfig } from '../../src/types';
 import { createFakeRedis, type FakeRedis } from './fake-redis';
@@ -67,11 +67,5 @@ describe('cache keys', () => {
         );
 
         expect(unnormalized).toBe(normalized);
-    });
-
-    test('ignore the cache property when computing a fingerprint', () => {
-        const withCache = computeFingerprint('Widget', 'findMany', { where: { a: 1 }, cache: { ttlSeconds: 5 } }, [], config);
-        const without = computeFingerprint('Widget', 'findMany', { where: { a: 1 } }, [], config);
-        expect(withCache).toBe(without);
     });
 });

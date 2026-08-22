@@ -3,7 +3,7 @@ import { createTestPrismaClient } from '../fixture/client';
 import { createCachedClient, createQueryCounter, type QueryCounter } from '../integration/helpers';
 import { createTestRedisClient } from '../support/service-preflight';
 import type { BenchmarkMetrics } from './benchmark-metrics';
-import type { BenchmarkProfile } from './profiles';
+import type { BenchmarkProfile, BenchmarkProfileName } from './profiles';
 
 const SEED_BATCH_SIZE = 100;
 const BENCHMARK_KEY_PREFIX = 'prismaCacheTags:benchmark:';
@@ -34,6 +34,7 @@ export interface BenchmarkReadCorpus {
 export interface BenchmarkFixture {
     runId: string;
     keyPrefix: string;
+    profileName: BenchmarkProfileName;
     tenantIds: string[];
     widgetsByWorker: BenchmarkWidget[][];
     readCorpus: BenchmarkReadCorpus;
@@ -174,6 +175,7 @@ export async function createBenchmarkFixture(
         return {
             runId,
             keyPrefix,
+            profileName: profile.name,
             tenantIds,
             widgetsByWorker,
             readCorpus,

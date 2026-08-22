@@ -1,6 +1,7 @@
 import type { BenchmarkMetrics } from './benchmark-metrics';
 import type { BenchmarkFixture, BenchmarkPart, BenchmarkReadCorpus, BenchmarkWidget } from './benchmark-fixture';
-import { selectOperation, type BenchmarkProfile } from './profiles';
+import { selectOperation, type BenchmarkProfile, type BenchmarkWorkloadName } from './profiles';
+import { createSeededPrng, selectZipfianRank } from './realistic-workload';
 
 const CACHE_TTL_SECONDS = 300;
 const MINIMUM_WARMUP_PASSES = 2;
@@ -8,18 +9,23 @@ const MAX_WARMUP_PASSES = 4;
 const MAX_WARMUP_ITEMS_PER_MODEL = 64;
 const MAX_WARMUP_LIST_TENANTS = 2;
 const LIST_READ_TAKE = 25;
+const LIST_HEAVY_READ_TAKE = 100;
 
 export const MAX_WARMUP_REQUESTS_PER_CLIENT =
-    MAX_WARMUP_ITEMS_PER_MODEL * 2 + MAX_WARMUP_LIST_TENANTS * 2;
+    MAX_WARMUP_ITEMS_PER_MODEL * 2 + MAX_WARMUP_LIST_TENANTS * 3;
 
-type ReadKind = 'widgetUnique' | 'partUnique' | 'widgetList' | 'partList';
+type ReadKind = 'widgetUnique' | 'partUnique' | 'widgetList' | 'partList' | 'widgetAggregate';
 
 export interface ColdListProbeResult {
     resultCount: number;
     databaseQueries: number;
 }
 
-export async function warmBenchmarkCache(fixture: BenchmarkFixture, profile: BenchmarkProfile): Promise<void> {
+export async function warmBenchmarkCache(
+    fixture: BenchmarkFixture,
+    profile: BenchmarkProfile,
+    workload: BenchmarkWorkloadName = 'standard',
+): Promise<void> {
     if (!fixture.coldListProbeCompleted) {
         await runColdSharedListQuery(fixture);
     }
@@ -33,7 +39,7 @@ export async function warmBenchmarkCache(fixture: BenchmarkFixture, profile: Ben
     do {
         await Promise.all(
             fixture.clients.map((client) =>
-                warmClient(client, widgets, parts, tenantIds),
+                warmClient(client, widgets, parts, tenantIds, workload),
             ),
         );
         completedPasses += 1;
@@ -63,6 +69,7 @@ export async function runColdSharedListQuery(fixture: BenchmarkFixture): Promise
             id: true,
             tenantId: true,
             name: true,
+            description: true,
         },
         cache: { ttlSeconds: CACHE_TTL_SECONDS },
     };
@@ -87,7 +94,12 @@ export async function runModelWorkload(
     fixture: BenchmarkFixture,
     profile: BenchmarkProfile,
     metrics: BenchmarkMetrics,
-    options: { now?: () => number; random?: () => number; maxOperationsPerWorker?: number } = {},
+    options: {
+        now?: () => number;
+        random?: () => number;
+        maxOperationsPerWorker?: number;
+        workload?: BenchmarkWorkloadName;
+    } = {},
 ): Promise<void> {
     if (fixture.clients.length < 2) {
         throw new Error('The benchmark requires at least two independent clients for cross-client freshness reads');
@@ -97,7 +109,10 @@ export async function runModelWorkload(
     }
 
     const now = options.now ?? Date.now;
-    const random = options.random ?? Math.random;
+    const workload = options.workload ?? 'standard';
+    const random =
+        options.random ??
+        (workload === 'zipfian' ? createSeededPrng(`${fixture.runId}:zipfian`) : Math.random);
     const deadline = now() + profile.durationMs;
 
     const workerResults = await Promise.allSettled(
@@ -109,6 +124,7 @@ export async function runModelWorkload(
                 fixture.readCorpus,
                 workerIndex,
                 profile,
+                workload,
                 metrics,
                 deadline,
                 now,
@@ -134,7 +150,9 @@ async function warmClient(
     widgets: BenchmarkWidget[],
     parts: BenchmarkPart[],
     tenantIds: string[],
+    workload: BenchmarkWorkloadName,
 ): Promise<void> {
+    const listTake = workload === 'standard' ? LIST_READ_TAKE : LIST_HEAVY_READ_TAKE;
     await Promise.all([
         ...widgets.map((widget) =>
             client.widget.findUnique({
@@ -152,7 +170,7 @@ async function warmClient(
             client.widget.findMany({
                 where: { tenantId },
                 orderBy: { id: 'asc' },
-                take: LIST_READ_TAKE,
+                take: listTake,
                 cache: { ttlSeconds: CACHE_TTL_SECONDS },
             }),
         ),
@@ -160,7 +178,14 @@ async function warmClient(
             client.part.findMany({
                 where: { tenantId },
                 orderBy: { id: 'asc' },
-                take: LIST_READ_TAKE,
+                take: listTake,
+                cache: { ttlSeconds: CACHE_TTL_SECONDS },
+            }),
+        ),
+        ...tenantIds.map((tenantId) =>
+            client.widget.aggregate({
+                where: { tenantId },
+                _count: { _all: true },
                 cache: { ttlSeconds: CACHE_TTL_SECONDS },
             }),
         ),
@@ -174,6 +199,7 @@ async function runWorker(
     readCorpus: BenchmarkReadCorpus,
     workerIndex: number,
     profile: BenchmarkProfile,
+    workload: BenchmarkWorkloadName,
     metrics: BenchmarkMetrics,
     deadline: number,
     now: () => number,
@@ -194,7 +220,7 @@ async function runWorker(
             const operation = selectOperation(random(), profile.readRatio);
 
             if (operation === 'read') {
-                await runReadOperation(readbackClient, readCorpus, random);
+                await runReadOperation(readbackClient, readCorpus, random, workload);
             } else {
                 const widget = ownedWidgets[selectIndex(random(), ownedWidgets.length)]!;
                 const expectedName = `benchmark:${workerIndex}:write:${writeCounter}`;
@@ -230,12 +256,18 @@ async function runReadOperation(
     client: BenchmarkFixture['clients'][number],
     readCorpus: BenchmarkReadCorpus,
     random: () => number,
+    workload: BenchmarkWorkloadName,
 ): Promise<void> {
-    const readKind = selectReadKind(random(), readCorpus.parts.length > 0);
+    const readKind = selectReadKind(random(), readCorpus.parts.length > 0, workload);
+    const listTake = workload === 'standard' ? LIST_READ_TAKE : LIST_HEAVY_READ_TAKE;
 
     switch (readKind) {
         case 'widgetUnique': {
-            const widget = readCorpus.widgets[selectIndex(random(), readCorpus.widgets.length)]!;
+            const widget = readCorpus.widgets[
+                workload === 'zipfian'
+                    ? selectZipfianRank(random, readCorpus.widgets.length)
+                    : selectIndex(random(), readCorpus.widgets.length)
+            ]!;
             await client.widget.findUnique({
                 where: { id: widget.id },
                 cache: { ttlSeconds: CACHE_TTL_SECONDS },
@@ -255,7 +287,7 @@ async function runReadOperation(
             await client.widget.findMany({
                 where: { tenantId },
                 orderBy: { id: 'asc' },
-                take: LIST_READ_TAKE,
+                take: listTake,
                 cache: { ttlSeconds: CACHE_TTL_SECONDS },
             });
             return;
@@ -265,7 +297,20 @@ async function runReadOperation(
             await client.part.findMany({
                 where: { tenantId },
                 orderBy: { id: 'asc' },
-                take: LIST_READ_TAKE,
+                take: listTake,
+                cache: { ttlSeconds: CACHE_TTL_SECONDS },
+            });
+            return;
+        }
+        case 'widgetAggregate': {
+            const tenantId = readCorpus.tenantIds[
+                workload === 'zipfian'
+                    ? selectZipfianRank(random, readCorpus.tenantIds.length)
+                    : selectIndex(random(), readCorpus.tenantIds.length)
+            ]!;
+            await client.widget.aggregate({
+                where: { tenantId },
+                _count: { _all: true },
                 cache: { ttlSeconds: CACHE_TTL_SECONDS },
             });
             return;
@@ -273,10 +318,24 @@ async function runReadOperation(
     }
 }
 
-function selectReadKind(sample: number, hasParts: boolean): ReadKind {
-    const kinds: ReadKind[] = hasParts
-        ? ['widgetUnique', 'partUnique', 'widgetList', 'partList']
-        : ['widgetUnique', 'widgetList', 'partList'];
+function selectReadKind(sample: number, hasParts: boolean, workload: BenchmarkWorkloadName): ReadKind {
+    const kinds: ReadKind[] =
+        workload === 'list-heavy'
+            ? [
+                  'widgetList',
+                  'partList',
+                  'widgetAggregate',
+                  'widgetList',
+                  'partList',
+                  'widgetAggregate',
+                  'widgetList',
+                  'partList',
+                  'widgetUnique',
+                  'partUnique',
+              ]
+            : hasParts
+              ? ['widgetUnique', 'partUnique', 'widgetList', 'partList']
+              : ['widgetUnique', 'widgetList', 'partList'];
     return kinds[Math.min(kinds.length - 1, selectIndex(sample, kinds.length))]!;
 }
 

@@ -38,6 +38,14 @@ describe('read-only cache comparison reporting', () => {
             cacheHitRate: 0.5,
             databaseQueries: 2,
             speedupVsRaw: 0.5,
+            queryKinds: [
+                { kind: 'widgetUnique', completed: 0, p50Ms: 0, p95Ms: 0, p99Ms: 0, operationsPerSecond: 0 },
+                { kind: 'partUnique', completed: 0, p50Ms: 0, p95Ms: 0, p99Ms: 0, operationsPerSecond: 0 },
+                { kind: 'widgetList', completed: 0, p50Ms: 0, p95Ms: 0, p99Ms: 0, operationsPerSecond: 0 },
+                { kind: 'partList', completed: 0, p50Ms: 0, p95Ms: 0, p99Ms: 0, operationsPerSecond: 0 },
+                { kind: 'widgetAggregate', completed: 0, p50Ms: 0, p95Ms: 0, p99Ms: 0, operationsPerSecond: 0 },
+            ],
+            eventLoop: { utilization: 0, activeMs: 0, idleMs: 0 },
         });
     });
 
@@ -61,6 +69,9 @@ describe('read-only cache comparison reporting', () => {
             'cache misses': 0,
             'cache hit rate': '0.0%',
             'database queries': 0,
+            'event-loop utilization': '0.0%',
+            'event-loop active (ms)': '0.00',
+            'event-loop idle (ms)': '0.00',
         });
     });
 

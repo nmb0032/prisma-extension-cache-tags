@@ -1,4 +1,5 @@
 import type { BenchmarkSummary } from './benchmark-metrics';
+import { QUERY_KINDS, type EventLoopSummary, type QueryKindSummary } from './query-kind-metrics';
 
 export type ReadComparisonMode = 'rawA' | 'cold' | 'warm' | 'rawB';
 
@@ -16,6 +17,8 @@ export interface ReadComparisonPhase {
     cacheHitRate: number;
     databaseQueries: number;
     speedupVsRaw: number | null;
+    queryKinds: QueryKindSummary[];
+    eventLoop: EventLoopSummary;
 }
 
 export type ReadComparisonReportRow = {
@@ -31,6 +34,19 @@ export type ReadComparisonReportRow = {
     'cache misses': number;
     'cache hit rate': string;
     'database queries': number;
+    'event-loop utilization': string;
+    'event-loop active (ms)': string;
+    'event-loop idle (ms)': string;
+};
+
+export type QueryKindReportRow = {
+    mode: ReadComparisonMode;
+    kind: QueryKindSummary['kind'];
+    completed: number;
+    'ops/sec': string;
+    'p50 (ms)': string;
+    'p95 (ms)': string;
+    'p99 (ms)': string;
 };
 
 export function createReadComparisonPhase(
@@ -38,6 +54,10 @@ export function createReadComparisonPhase(
     summary: BenchmarkSummary,
     digest: string,
     rawOperationsPerSecond: number | null,
+    details: {
+        queryKinds?: QueryKindSummary[];
+        eventLoop?: EventLoopSummary;
+    } = {},
 ): ReadComparisonPhase {
     if (rawOperationsPerSecond !== null && (!Number.isFinite(rawOperationsPerSecond) || rawOperationsPerSecond <= 0)) {
         throw new Error('rawOperationsPerSecond must be greater than 0');
@@ -57,6 +77,15 @@ export function createReadComparisonPhase(
         cacheHitRate: summary.cacheHitRate,
         databaseQueries: summary.databaseQueries,
         speedupVsRaw: rawOperationsPerSecond === null ? null : summary.operationsPerSecond / rawOperationsPerSecond,
+        queryKinds: details.queryKinds ?? QUERY_KINDS.map((kind) => ({
+            kind,
+            completed: 0,
+            p50Ms: 0,
+            p95Ms: 0,
+            p99Ms: 0,
+            operationsPerSecond: 0,
+        })),
+        eventLoop: details.eventLoop ?? { utilization: 0, activeMs: 0, idleMs: 0 },
     };
 }
 
@@ -83,5 +112,20 @@ export function buildReadComparisonReportRow(phase: ReadComparisonPhase): ReadCo
         'cache misses': phase.cacheMisses,
         'cache hit rate': `${(phase.cacheHitRate * 100).toFixed(1)}%`,
         'database queries': phase.databaseQueries,
+        'event-loop utilization': `${(phase.eventLoop.utilization * 100).toFixed(1)}%`,
+        'event-loop active (ms)': phase.eventLoop.activeMs.toFixed(2),
+        'event-loop idle (ms)': phase.eventLoop.idleMs.toFixed(2),
     };
+}
+
+export function buildReadComparisonKindReportRows(phase: ReadComparisonPhase): QueryKindReportRow[] {
+    return phase.queryKinds.map((summary) => ({
+        mode: phase.mode,
+        kind: summary.kind,
+        completed: summary.completed,
+        'ops/sec': summary.operationsPerSecond.toFixed(1),
+        'p50 (ms)': summary.p50Ms.toFixed(2),
+        'p95 (ms)': summary.p95Ms.toFixed(2),
+        'p99 (ms)': summary.p99Ms.toFixed(2),
+    }));
 }

@@ -8,6 +8,7 @@ import {
     runReadOnlyComparison,
     type ReadComparisonOperation,
 } from '../../tests/load/read-comparison';
+import { buildReadComparisonKindReportRows } from '../../tests/load/read-comparison-report';
 import type { ReadComparisonMode } from '../../tests/load/read-comparison-report';
 
 describe('read-only cache comparison planning', () => {
@@ -35,6 +36,8 @@ describe('read-only cache comparison planning', () => {
             { kind: 'widgetList', tenantId: 'tenant-1' },
             { kind: 'partList', tenantId: 'tenant-0' },
             { kind: 'partList', tenantId: 'tenant-1' },
+            { kind: 'widgetAggregate', tenantId: 'tenant-0' },
+            { kind: 'widgetAggregate', tenantId: 'tenant-1' },
         ]);
         expect(buildReadComparisonPlan(corpus)).toEqual(plan);
     });
@@ -90,6 +93,21 @@ describe('read-only cache comparison planning', () => {
             );
         },
     );
+
+    test('renders a separate per-kind table without collapsing aggregate latency', () => {
+        const metrics = new BenchmarkMetrics();
+        metrics.recordOperation('read', 10);
+        const fixture = createFakeComparisonFixture({ metrics });
+
+        return runReadOnlyComparison(fixture, metrics).then((comparison) => {
+            const rows = buildReadComparisonKindReportRows(comparison.phases.rawA);
+            expect(rows).toHaveLength(5);
+            expect(rows.find((row) => row.kind === 'widgetAggregate')).toMatchObject({
+                mode: 'rawA',
+                completed: 1,
+            });
+        });
+    });
 });
 
 interface FakeComparisonFixtureOptions {
@@ -164,6 +182,8 @@ function createFakeComparisonFixture(options: FakeComparisonFixtureOptions = {})
                     return [{ id: 'widget-0', tenantId: operation.tenantId, name: 'widget-0' }];
                 case 'partList':
                     return [{ id: 'part-0', tenantId: operation.tenantId, label: 'part-0', widgetId: 'widget-0' }];
+                case 'widgetAggregate':
+                    return { _count: { _all: 1 } };
             }
         };
 
@@ -176,6 +196,8 @@ function createFakeComparisonFixture(options: FakeComparisonFixtureOptions = {})
                 findUnique: (args: { cache?: { enabled?: boolean } }) =>
                     read({ kind: 'widgetUnique', widgetId: 'widget-0' }, args),
                 findMany: (args: { cache?: { enabled?: boolean } }) => read({ kind: 'widgetList', tenantId: 'tenant-0' }, args),
+                aggregate: (args: { cache?: { enabled?: boolean } }) =>
+                    read({ kind: 'widgetAggregate', tenantId: 'tenant-0' }, args),
             },
             part: {
                 findUnique: (args: { cache?: { enabled?: boolean } }) => read({ kind: 'partUnique', partId: 'part-0' }, args),

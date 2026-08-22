@@ -35,6 +35,10 @@ pnpm db:up
 pnpm test:integration
 pnpm test:benchmark:invalidation
 pnpm test:benchmark:load
+pnpm test:benchmark:load -- --profile quick
+pnpm test:benchmark:load -- --workload list-heavy
+pnpm test:benchmark:load -- --workload zipfian
+pnpm test:benchmark:load -- --profile stress
 ```
 
 The invalidation benchmark is a synthetic Redis keyspace-scaling check. The
@@ -53,6 +57,27 @@ so its cache state and counters remain isolated from the comparison.
 Warm-up requests are sampled and bounded; each benchmark Prisma client uses one
 PostgreSQL connection so the stress profile remains within its concurrency
 budget.
+
+The load benchmark defaults to the `standard` workload, which is intentionally
+unfavorable to caching because it contains mostly unique reads and writes.
+`list-heavy` runs the same finite raw-A/cold/warm/raw-B comparison with
+`take: 100`, deterministic 512-character Widget and 256-character Part
+descriptions, and at least 70% list/aggregate reads. `zipfian` uses a seeded
+PRNG with exponent 1.1, repeated hot keys, and an approximately 80%
+hottest-20% traffic target. Every workload prints aggregate and per-kind
+latency/throughput, cache/DB counts, process-wide Redis commandstats deltas,
+event-loop utilization, contention, and mixed correctness/freshness results.
+
+To benchmark a network-separated or latency-injected Redis, set
+`TEST_REDIS_URL`:
+
+```bash
+TEST_REDIS_URL=redis://benchmark-redis.example:6379 pnpm test:benchmark:load -- --workload zipfian
+```
+
+No automated test depends on that network. Benchmark results are
+environment-specific evidence, not universal performance claims; record host,
+service versions, topology, profile, and workload with every run.
 
 The model-backed benchmark cleans up only its run-specific database rows and
 Redis namespace by default; normal cleanup never flushes the Redis database.

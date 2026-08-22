@@ -151,7 +151,11 @@ needs both PostgreSQL and Redis.
 ```bash
 pnpm test:benchmark:invalidation
 pnpm test:benchmark:load
+pnpm test:benchmark:load -- --profile quick
 pnpm test:benchmark:load -- --profile stress
+pnpm test:benchmark:load -- --workload list-heavy
+pnpm test:benchmark:load -- --workload zipfian
+pnpm test:benchmark:load -- --profile stress --workload list-heavy
 pnpm test:benchmark:load -- --preserve
 ```
 
@@ -163,8 +167,12 @@ finite deterministic plan from the fixture's shared corpus. Cold starts after
 clearing the run namespace; warm repeats without cleanup. Every measured phase
 uses the same clients and concurrency, verifies result-digest equivalence, and
 reports throughput, latency percentiles, cache hits/misses, and database queries.
-The report shows symmetric raw A/B drift. When drift is at most 10%, speedups use
-the arithmetic mean of both raw samples; otherwise they render as `unstable`.
+The plan includes unique Widget/Part reads, tenant lists, and a Widget
+aggregate. A separate per-query-kind table prevents the aggregate from hiding a
+regression. Event-loop active/idle milliseconds and utilization are reported.
+The report shows symmetric raw A/B drift. When drift is at most 10%, speedups
+use the arithmetic mean of both raw samples; otherwise they render as
+`unstable`.
 
 The load benchmark also synchronizes 32 independent clients on one cold key.
 Quick runs use 10 rounds and stress runs use 30, reporting one database-query
@@ -173,6 +181,19 @@ existing blended 90% read / 10% write report for invalidation, distributed
 stampede, and post-write freshness validation. The comparison namespace is
 cleared before that mixed-workload warm-up so its cache state and report remain
 isolated from the comparison.
+
+The load command also runs isolated warm-read, cold-read, write, and multi-tag
+invalidation probes. Redis `INFO commandstats` deltas are explicitly labeled
+process-wide rather than namespace-local, and probes run without benchmark
+workers. Event-loop utilization is included for comparison phases, probes,
+contention, and the mixed correctness phase.
+
+`standard` is intentionally unfavorable to caching because it contains mostly
+unique reads and writes. `list-heavy` uses `take: 100`, deterministic
+512-character Widget and 256-character Part descriptions, and at least 70%
+list/aggregate reads. `zipfian` uses a seeded PRNG, exponent 1.1, repeated hot
+keys, cold contention, and an approximately 80% hottest-20% traffic target
+(reported with a ±10% tolerance).
 
 The `quick` profile is the default; `--profile stress` uses a larger dataset,
 more concurrency, and a longer measurement window for deliberate capacity
@@ -189,8 +210,11 @@ query count, errors, and freshness failures. The preceding comparison has its
 own rows and counters, so its read-only measurements do not alter the mixed
 workload report. A focused Redis `INFO commandstats` probe can isolate warm
 lookup, cold-owner, and multi-tag invalidation command deltas; `INFO` counters
-are process-wide, so reset and run each probe without concurrent traffic.
-Node event-loop utilization is not instrumented.
+are process-wide, so reset and run each probe without concurrent traffic. A
+network-separated or latency-injected Redis can be selected with
+`TEST_REDIS_URL`; this is external configuration, not an automated dependency.
+Hardware, service versions, topology, and background load affect results, so
+local numbers must not be presented as universal package performance claims.
 
 The model-backed benchmark normally removes only the current run's database rows
 and Redis namespace, and never flushes the Redis database. Pass `--preserve` to

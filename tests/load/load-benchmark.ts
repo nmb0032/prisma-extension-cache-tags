@@ -3,9 +3,20 @@ import { createBenchmarkFixture, deleteRedisNamespace, type BenchmarkFixture } f
 import { buildBenchmarkReportRow } from './benchmark-report';
 import { runColdKeyContention, type ContentionBenchmarkResult } from './contention-benchmark';
 import { runModelWorkload, warmBenchmarkCache } from './model-workload';
-import { buildReadComparisonReportRow } from './read-comparison-report';
+import {
+    buildReadComparisonKindReportRows,
+    buildReadComparisonReportRow,
+} from './read-comparison-report';
 import { runReadOnlyComparison } from './read-comparison';
-import { parseBenchmarkArgs, type BenchmarkProfile, type BenchmarkProfileName } from './profiles';
+import { parseBenchmarkArgs, type BenchmarkProfile, type BenchmarkProfileName, type BenchmarkWorkloadName } from './profiles';
+import {
+    measureRedisCommandPhase,
+    summarizeEventLoopDelta,
+    type RedisCommandCounts,
+    type RedisCommandPhaseMeasurement,
+} from './query-kind-metrics';
+import { calculateHotKeyShare, ZIPFIAN_EXPONENT } from './realistic-workload';
+import { performance } from 'node:perf_hooks';
 import {
     checkPostgresReachability,
     ensureFixtureSchema,
@@ -91,6 +102,10 @@ function printContentionReport(result: ContentionBenchmarkResult): void {
             'p99 (ms)': result.losers.p99Ms.toFixed(2),
         },
     ]);
+    console.log(
+        `Contention event-loop utilization: ${(result.eventLoop.utilization * 100).toFixed(1)}% ` +
+            `(active ${result.eventLoop.activeMs.toFixed(2)}ms, idle ${result.eventLoop.idleMs.toFixed(2)}ms)`,
+    );
 }
 
 function createContentionProfile(profile: BenchmarkProfile): BenchmarkProfile {
@@ -106,9 +121,133 @@ function createContentionProfile(profile: BenchmarkProfile): BenchmarkProfile {
     };
 }
 
+interface RedisCommandProbeReport {
+    warmRead: RedisCommandPhaseMeasurement;
+    coldRead: RedisCommandPhaseMeasurement;
+    write: RedisCommandPhaseMeasurement;
+    multiTagInvalidation: RedisCommandPhaseMeasurement;
+}
+
+async function runRedisCommandProbes(fixture: BenchmarkFixture): Promise<RedisCommandProbeReport> {
+    const client = fixture.clients[0];
+    const widget = fixture.readCorpus.widgets[0];
+    if (client === undefined || widget === undefined) {
+        throw new Error('Redis command probes require one seeded widget and client');
+    }
+
+    await deleteRedisNamespace(fixture.redis, fixture.keyPrefix);
+    await client.widget.findUnique({
+        where: { id: widget.id },
+        cache: { ttlSeconds: 300 },
+    });
+    const warmRead = await measureRedisCommandPhase(fixture.redis, async () => {
+        await client.widget.findUnique({
+            where: { id: widget.id },
+            cache: { ttlSeconds: 300 },
+        });
+    });
+
+    await deleteRedisNamespace(fixture.redis, fixture.keyPrefix);
+    const coldRead = await measureRedisCommandPhase(fixture.redis, async () => {
+        await client.widget.findUnique({
+            where: { id: widget.id },
+            cache: { ttlSeconds: 300 },
+        });
+    });
+
+    const write = await measureRedisCommandPhase(fixture.redis, async () => {
+        await client.widget.update({
+            where: { id: widget.id },
+            data: { name: `${widget.initialName}:command-probe` },
+        });
+    });
+
+    const multiTagInvalidation = await measureRedisCommandPhase(fixture.redis, async () => {
+        await client.widget.updateMany({
+            where: { tenantId: { in: fixture.tenantIds } },
+            data: { name: `${widget.initialName}:multi-tag-probe` },
+        });
+    });
+
+    return { warmRead, coldRead, write, multiTagInvalidation };
+}
+
+function printRedisCommandProbeReport(report: RedisCommandProbeReport): void {
+    console.log('Redis command deltas (process-wide INFO commandstats counters; not namespace-local):');
+    console.table(
+        Object.entries(report).map(([phase, measurement]) => ({
+            phase,
+            ...formatCommandCounts(measurement.delta),
+            'event-loop utilization': `${(measurement.eventLoop.utilization * 100).toFixed(1)}%`,
+            'event-loop active (ms)': measurement.eventLoop.activeMs.toFixed(2),
+            'event-loop idle (ms)': measurement.eventLoop.idleMs.toFixed(2),
+        })),
+    );
+}
+
+function formatCommandCounts(counts: RedisCommandCounts): Record<string, number> {
+    return {
+        get: counts.get,
+        mget: counts.mget,
+        set: counts.set,
+        eval: counts.eval,
+        evalsha: counts.evalsha,
+        incrby: counts.incrby,
+        expire: counts.expire,
+    };
+}
+
+function printReadComparisonReport(
+    comparison: Awaited<ReturnType<typeof runReadOnlyComparison>>,
+    workload: BenchmarkWorkloadName,
+    hotKeyIds: readonly string[],
+): void {
+    console.log(`Read-only cache comparison for workload ${workload} (same deterministic plan and concurrency):`);
+    console.table([
+        comparison.phases.rawA,
+        comparison.phases.cold,
+        comparison.phases.warm,
+        comparison.phases.rawB,
+    ].map(buildReadComparisonReportRow));
+    for (const phase of [
+        comparison.phases.rawA,
+        comparison.phases.cold,
+        comparison.phases.warm,
+        comparison.phases.rawB,
+    ]) {
+        console.log(`${phase.mode} per-query-kind latency and throughput:`);
+        console.table(buildReadComparisonKindReportRows(phase));
+    }
+
+    const listOrAggregateReads = comparison.plan.filter(
+        (operation) =>
+            operation.kind === 'widgetList' ||
+            operation.kind === 'partList' ||
+            operation.kind === 'widgetAggregate',
+    ).length;
+    if (workload === 'list-heavy') {
+        console.log(
+            `List-heavy distribution: ${((listOrAggregateReads / comparison.plan.length) * 100).toFixed(1)}% ` +
+                'tenant list/aggregate reads (target >= 70.0%); list take=100.',
+        );
+    } else if (workload === 'zipfian') {
+        console.log(
+            `Zipfian distribution: exponent=${ZIPFIAN_EXPONENT.toFixed(1)}, ` +
+                `hottest 20% widget-key share=${(
+                    calculateHotKeyShare(
+                        comparison.plan,
+                        hotKeyIds.length,
+                        hotKeyIds,
+                    ) * 100
+                ).toFixed(1)}% ` +
+                '(target 80.0% +/- 10.0%).',
+        );
+    }
+}
+
 async function main(): Promise<void> {
     const args = process.argv.slice(2);
-    const { profile, preserve } = parseBenchmarkArgs(args[0] === '--' ? args.slice(1) : args);
+    const { profile, preserve, workload } = parseBenchmarkArgs(args[0] === '--' ? args.slice(1) : args);
 
     await checkServices();
     ensureFixtureSchema();
@@ -120,26 +259,33 @@ async function main(): Promise<void> {
     let primaryError: unknown;
     let measurementStartedAt: bigint | undefined;
     let reportPrinted = false;
+    let mixedEventLoop: ReturnType<typeof summarizeEventLoopDelta> | undefined;
+    let commandProbes: RedisCommandProbeReport | undefined;
 
     try {
         console.log(`Benchmark profile: ${profile.name}`);
+        console.log(`Benchmark workload: ${workload}`);
+        console.log(`Environment: TEST_DATABASE_URL=${TEST_DATABASE_URL}; TEST_REDIS_URL=${TEST_REDIS_URL}`);
         console.log(`Run namespace: ${fixture.keyPrefix}`);
         if (preserve) {
             printPreservedResources(fixture);
         }
 
-        const comparison = await runReadOnlyComparison(fixture, metrics);
+        commandProbes = await runRedisCommandProbes(fixture);
+        printRedisCommandProbeReport(commandProbes);
+
+        const comparison = await runReadOnlyComparison(fixture, metrics, workload);
         console.log(`Discarded read warm-up: ${comparison.warmupReads} reads`);
         console.log(
             `Raw A/B drift: ${comparison.rawDriftPercent.toFixed(2)}% (${comparison.stableRawBaseline ? 'stable' : 'unstable'}; stable <= 10.00%)`,
         );
-        console.log('Read-only cache comparison (same deterministic plan and concurrency; raw baseline is A/B mean when stable):');
-        console.table([
-            comparison.phases.rawA,
-            comparison.phases.cold,
-            comparison.phases.warm,
-            comparison.phases.rawB,
-        ].map(buildReadComparisonReportRow));
+        printReadComparisonReport(
+            comparison,
+            workload,
+            fixture.readCorpus.widgets
+                .slice(0, Math.ceil(fixture.readCorpus.widgets.length * 0.2))
+                .map((widget) => widget.id),
+        );
 
         const contentionTarget =
             fixture.clients.length >= 32
@@ -161,15 +307,29 @@ async function main(): Promise<void> {
         }
 
         await deleteRedisNamespace(fixture.redis, fixture.keyPrefix);
-        await warmBenchmarkCache(fixture, profile);
+        await warmBenchmarkCache(fixture, profile, workload);
         metrics.reset();
         for (const queryCounter of fixture.queryCounters) {
             queryCounter.reset();
         }
 
         measurementStartedAt = process.hrtime.bigint();
-        await runModelWorkload(fixture, profile, metrics);
+        const mixedEventLoopStart = performance.eventLoopUtilization();
+        await runModelWorkload(fixture, profile, metrics, { workload });
+        const mixedEventLoopDelta = performance.eventLoopUtilization(mixedEventLoopStart);
+        mixedEventLoop = summarizeEventLoopDelta({
+            active: mixedEventLoopDelta.active,
+            idle: mixedEventLoopDelta.idle,
+        });
         const summary = printBenchmarkReport(profile.name, metrics, measurementStartedAt);
+        console.log(
+            `Mixed correctness workload: ${summary.errors === 0 && summary.freshnessFailures === 0 ? 'PASS' : 'FAIL'} ` +
+                `(errors=${summary.errors}, freshness failures=${summary.freshnessFailures})`,
+        );
+        console.log(
+            `Mixed event-loop utilization: ${(mixedEventLoop.utilization * 100).toFixed(1)}% ` +
+                `(active ${mixedEventLoop.activeMs.toFixed(2)}ms, idle ${mixedEventLoop.idleMs.toFixed(2)}ms)`,
+        );
         reportPrinted = true;
 
         if (summary.errors !== 0 || summary.freshnessFailures !== 0) {

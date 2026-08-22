@@ -1,6 +1,14 @@
 import { createHash } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { deleteRedisNamespace, type BenchmarkFixture, type BenchmarkReadCorpus } from './benchmark-fixture';
 import { BenchmarkMetrics } from './benchmark-metrics';
+import type { BenchmarkWorkloadName } from './profiles';
+import {
+    buildListHeavyPlan,
+    buildZipfianPlan,
+    createRealisticWorkloadProfile,
+    type RealisticWorkloadOperation,
+} from './realistic-workload';
 import {
     calculateRawDriftPercent,
     createReadComparisonPhase,
@@ -8,6 +16,12 @@ import {
     type ReadComparisonMode,
     type ReadComparisonPhase,
 } from './read-comparison-report';
+import {
+    QueryKindMetrics,
+    summarizeEventLoopDelta,
+    type EventLoopSummary,
+    type QueryKindSummary,
+} from './query-kind-metrics';
 
 const CACHE_TTL_SECONDS = 300;
 const LIST_READ_TAKE = 25;
@@ -15,8 +29,9 @@ const LIST_READ_TAKE = 25;
 export type ReadComparisonOperation =
     | { kind: 'widgetUnique'; widgetId: string }
     | { kind: 'partUnique'; partId: string }
-    | { kind: 'widgetList'; tenantId: string }
-    | { kind: 'partList'; tenantId: string };
+    | { kind: 'widgetList'; tenantId: string; take?: number }
+    | { kind: 'partList'; tenantId: string; take?: number }
+    | { kind: 'widgetAggregate'; tenantId: string };
 
 export interface ReadOnlyComparison {
     plan: ReadComparisonOperation[];
@@ -34,9 +49,14 @@ export interface ReadOnlyComparison {
 interface PhaseExecution {
     digest: string;
     summary: ReturnType<BenchmarkMetrics['summarize']>;
+    queryKinds: QueryKindSummary[];
+    eventLoop: EventLoopSummary;
 }
 
-export function buildReadComparisonPlan(corpus: BenchmarkReadCorpus): ReadComparisonOperation[] {
+export function buildReadComparisonPlan(
+    corpus: BenchmarkReadCorpus,
+    workload: BenchmarkWorkloadName = 'standard',
+): ReadComparisonOperation[] {
     if (corpus.widgets.length === 0) {
         throw new Error('The benchmark read corpus must contain at least one widget');
     }
@@ -47,12 +67,21 @@ export function buildReadComparisonPlan(corpus: BenchmarkReadCorpus): ReadCompar
         throw new Error('The benchmark read corpus must contain at least one tenant');
     }
 
-    return [
+    const standardPlan: ReadComparisonOperation[] = [
         ...corpus.widgets.map((widget) => ({ kind: 'widgetUnique' as const, widgetId: widget.id })),
         ...corpus.parts.map((part) => ({ kind: 'partUnique' as const, partId: part.id })),
         ...corpus.tenantIds.map((tenantId) => ({ kind: 'widgetList' as const, tenantId })),
         ...corpus.tenantIds.map((tenantId) => ({ kind: 'partList' as const, tenantId })),
+        ...corpus.tenantIds.map((tenantId) => ({ kind: 'widgetAggregate' as const, tenantId })),
     ];
+
+    if (workload === 'standard') {
+        return standardPlan;
+    }
+    if (workload === 'list-heavy') {
+        return buildListHeavyPlan(corpus, createRealisticWorkloadProfile('list-heavy')).map(toReadComparisonOperation);
+    }
+    return buildZipfianPlan(corpus, createRealisticWorkloadProfile('zipfian'), 'read-comparison').map(toReadComparisonOperation);
 }
 
 export function createReadComparisonDigest(results: readonly unknown[]): string {
@@ -77,8 +106,9 @@ export function assertReadComparisonEquivalent(
 export async function runReadOnlyComparison(
     fixture: BenchmarkFixture,
     metrics: BenchmarkMetrics,
+    workload: BenchmarkWorkloadName = 'standard',
 ): Promise<ReadOnlyComparison> {
-    const plan = buildReadComparisonPlan(fixture.readCorpus);
+    const plan = buildReadComparisonPlan(fixture.readCorpus, workload);
     await Promise.all(fixture.clients.map((client) => client.$connect()));
     const warmupReads = await executeReadComparisonWarmup(fixture, plan);
     const rawA = await executeReadComparisonPhase(fixture, plan, 'rawA', metrics);
@@ -97,10 +127,22 @@ export async function runReadOnlyComparison(
     const rawOperationsPerSecond = stableRawBaseline
         ? (rawA.summary.operationsPerSecond + rawB.summary.operationsPerSecond) / 2
         : null;
-    const rawAPhase = createReadComparisonPhase('rawA', rawA.summary, rawA.digest, rawOperationsPerSecond);
-    const coldPhase = createReadComparisonPhase('cold', cold.summary, cold.digest, rawOperationsPerSecond);
-    const warmPhase = createReadComparisonPhase('warm', warm.summary, warm.digest, rawOperationsPerSecond);
-    const rawBPhase = createReadComparisonPhase('rawB', rawB.summary, rawB.digest, rawOperationsPerSecond);
+    const rawAPhase = createReadComparisonPhase('rawA', rawA.summary, rawA.digest, rawOperationsPerSecond, {
+        queryKinds: rawA.queryKinds,
+        eventLoop: rawA.eventLoop,
+    });
+    const coldPhase = createReadComparisonPhase('cold', cold.summary, cold.digest, rawOperationsPerSecond, {
+        queryKinds: cold.queryKinds,
+        eventLoop: cold.eventLoop,
+    });
+    const warmPhase = createReadComparisonPhase('warm', warm.summary, warm.digest, rawOperationsPerSecond, {
+        queryKinds: warm.queryKinds,
+        eventLoop: warm.eventLoop,
+    });
+    const rawBPhase = createReadComparisonPhase('rawB', rawB.summary, rawB.digest, rawOperationsPerSecond, {
+        queryKinds: rawB.queryKinds,
+        eventLoop: rawB.eventLoop,
+    });
 
     return {
         plan,
@@ -168,12 +210,15 @@ async function executeReadComparisonPhase(
     }
 
     const startedAt = process.hrtime.bigint();
+    const eventLoopStart = performance.eventLoopUtilization();
+    const queryKinds = new QueryKindMetrics();
     const workerResults = await Promise.allSettled(
         fixture.clients.map((client, workerIndex) =>
-            runReadComparisonWorker(client, plan, mode, workerIndex, fixture.clients.length, metrics),
+            runReadComparisonWorker(client, plan, mode, workerIndex, fixture.clients.length, metrics, queryKinds),
         ),
     );
     const elapsedMs = Math.max(0.001, Number(process.hrtime.bigint() - startedAt) / 1_000_000);
+    const eventLoopDelta = performance.eventLoopUtilization(eventLoopStart);
 
     const failures = workerResults.flatMap((result) => (result.status === 'rejected' ? [result.reason] : []));
     if (failures.length === 1) {
@@ -192,7 +237,7 @@ async function executeReadComparisonPhase(
     const databaseQueries = fixture.queryCounters.reduce((total, counter) => total + counter.total, 0);
     metrics.addDatabaseQueries(databaseQueries);
     const summary = metrics.summarize(elapsedMs);
-    assertReadComparisonPhaseInvariants(mode, plan.length, summary);
+    assertReadComparisonPhaseInvariants(mode, plan.length, countDistinctOperations(plan), summary);
 
     return {
         digest: createReadComparisonDigest(
@@ -203,19 +248,25 @@ async function executeReadComparisonPhase(
             })),
         ),
         summary,
+        queryKinds: queryKinds.summarize(elapsedMs),
+        eventLoop: summarizeEventLoopDelta({
+            active: eventLoopDelta.active,
+            idle: eventLoopDelta.idle,
+        }),
     };
 }
 
 function assertReadComparisonPhaseInvariants(
     mode: ReadComparisonMode,
     expectedReads: number,
+    expectedColdMisses: number,
     summary: ReturnType<BenchmarkMetrics['summarize']>,
 ): void {
     const expected = {
         completedReads: expectedReads,
         cacheHits: mode === 'warm' ? expectedReads : 0,
-        cacheMisses: mode === 'cold' ? expectedReads : 0,
-        databaseQueries: mode === 'warm' ? 0 : expectedReads,
+        cacheMisses: mode === 'cold' ? expectedColdMisses : 0,
+        databaseQueries: mode === 'warm' ? 0 : mode === 'cold' ? expectedColdMisses : expectedReads,
     };
     const observed = {
         completedReads: summary.reads,
@@ -224,10 +275,15 @@ function assertReadComparisonPhaseInvariants(
         databaseQueries: summary.databaseQueries,
     };
 
+    const cacheCountsValid =
+        mode === 'cold'
+            ? observed.cacheHits + observed.cacheMisses >= expectedReads &&
+              observed.cacheMisses >= expectedColdMisses &&
+              observed.cacheHits >= expectedReads - expectedColdMisses
+            : observed.cacheHits === expected.cacheHits && observed.cacheMisses === expected.cacheMisses;
     if (
         observed.completedReads !== expected.completedReads ||
-        observed.cacheHits !== expected.cacheHits ||
-        observed.cacheMisses !== expected.cacheMisses ||
+        !cacheCountsValid ||
         observed.databaseQueries !== expected.databaseQueries
     ) {
         throw new Error(
@@ -257,6 +313,7 @@ async function runReadComparisonWorker(
     workerIndex: number,
     workerCount: number,
     metrics: BenchmarkMetrics,
+    queryKinds: QueryKindMetrics,
 ): Promise<Array<{ index: number; result: unknown }>> {
     const results: Array<{ index: number; result: unknown }> = [];
 
@@ -266,7 +323,9 @@ async function runReadComparisonWorker(
         try {
             const result = await executeReadComparisonOperation(client, operation, mode);
             results.push({ index, result });
-            metrics.recordOperation('read', Number(process.hrtime.bigint() - startedAt) / 1_000_000);
+            const durationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
+            metrics.recordOperation('read', durationMs);
+            queryKinds.record(operation.kind, durationMs);
         } catch (error) {
             metrics.recordError();
             throw error;
@@ -301,17 +360,42 @@ async function executeReadComparisonOperation(
             return client.widget.findMany({
                 where: { tenantId: operation.tenantId },
                 orderBy: { id: 'asc' },
-                take: LIST_READ_TAKE,
+                take: operation.take ?? LIST_READ_TAKE,
                 cache,
             });
         case 'partList':
             return client.part.findMany({
                 where: { tenantId: operation.tenantId },
                 orderBy: { id: 'asc' },
-                take: LIST_READ_TAKE,
+                take: operation.take ?? LIST_READ_TAKE,
+                cache,
+            });
+        case 'widgetAggregate':
+            return client.widget.aggregate({
+                where: { tenantId: operation.tenantId },
+                _count: { _all: true },
                 cache,
             });
     }
+}
+
+function toReadComparisonOperation(operation: RealisticWorkloadOperation): ReadComparisonOperation {
+    switch (operation.kind) {
+        case 'widgetUnique':
+            return operation;
+        case 'partUnique':
+            return operation;
+        case 'widgetList':
+            return operation;
+        case 'partList':
+            return operation;
+        case 'widgetAggregate':
+            return operation;
+    }
+}
+
+function countDistinctOperations(plan: readonly ReadComparisonOperation[]): number {
+    return new Set(plan.map((operation) => canonicalize(operation))).size;
 }
 
 function canonicalize(value: unknown): string {

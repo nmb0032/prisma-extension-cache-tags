@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks';
 import { canonicalizePrismaValue } from '../../src/canonical';
 import { deleteRedisNamespace, type BenchmarkFixture } from './benchmark-fixture';
+import { summarizeEventLoopDelta, type EventLoopSummary } from './query-kind-metrics';
 import { percentile } from './statistics';
 
 export interface LatencySummary {
@@ -15,6 +16,7 @@ export interface ContentionBenchmarkResult {
     databaseQueriesPerRound: number[];
     winner: LatencySummary;
     losers: LatencySummary;
+    eventLoop: EventLoopSummary;
 }
 
 export async function runColdKeyContention(
@@ -39,6 +41,7 @@ export async function runColdKeyContention(
     const loserSamples: number[] = [];
     const clients = fixture.clients.slice(0, contenders);
     await Promise.all(clients.map((client) => client.$connect()));
+    const eventLoopStart = performance.eventLoopUtilization();
 
     for (let round = 0; round < rounds; round += 1) {
         await deleteRedisNamespace(fixture.redis, fixture.keyPrefix);
@@ -77,12 +80,17 @@ export async function runColdKeyContention(
         loserSamples.push(...latencies.slice(1));
     }
 
+    const eventLoopDelta = performance.eventLoopUtilization(eventLoopStart);
     return {
         rounds,
         contenders,
         databaseQueriesPerRound,
         winner: summarizeLatencies(winnerSamples),
         losers: summarizeLatencies(loserSamples),
+        eventLoop: summarizeEventLoopDelta({
+            active: eventLoopDelta.active,
+            idle: eventLoopDelta.idle,
+        }),
     };
 }
 

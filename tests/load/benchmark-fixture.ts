@@ -10,12 +10,15 @@ const BENCHMARK_KEY_PREFIX = 'prismaCacheTags:benchmark:';
 const SAFE_RUN_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 const REDIS_GLOB_METACHARACTERS = /[*?\[\]\\]/;
 export const BENCHMARK_MAX_CONNECTIONS_PER_CLIENT = 1;
+export const BENCHMARK_WIDGET_DESCRIPTION = 'widget benchmark payload '.repeat(22).slice(0, 512);
+export const BENCHMARK_PART_DESCRIPTION = 'part benchmark payload '.repeat(16).slice(0, 256);
 
 export interface BenchmarkPart {
     id: string;
     tenantId: string;
     label: string;
     widgetId: string;
+    description?: string;
 }
 
 export interface BenchmarkWidget {
@@ -23,6 +26,7 @@ export interface BenchmarkWidget {
     tenantId: string;
     initialName: string;
     workerIndex: number;
+    description?: string;
 }
 
 export interface BenchmarkReadCorpus {
@@ -126,6 +130,7 @@ export async function createBenchmarkFixture(
                 tenantId: widget.tenantId,
                 initialName: widget.initialName,
                 workerIndex: index % profile.concurrency,
+                description: widget.description,
             };
             widgetsByWorker[index % profile.concurrency]!.push({
                 ...benchmarkWidget,
@@ -301,6 +306,7 @@ async function seedBenchmarkWidgets(
                 id: string;
                 tenantId: string;
                 name: string;
+                description: string;
                 parts: BenchmarkPart[];
             }>> = [];
             let preparationFailed = false;
@@ -313,6 +319,7 @@ async function seedBenchmarkWidgets(
                     const parts = Array.from({ length: profile.partsPerWidget }, (_, partIndex) => ({
                         tenantId,
                         label: `${initialName}:part:${partIndex}`,
+                        description: BENCHMARK_PART_DESCRIPTION,
                     }));
 
                     pendingCreates.push(
@@ -320,17 +327,20 @@ async function seedBenchmarkWidgets(
                             data: {
                                 tenantId,
                                 name: initialName,
+                                description: BENCHMARK_WIDGET_DESCRIPTION,
                                 ...(parts.length > 0 ? { parts: { create: parts } } : {}),
                             },
                             select: {
                                 id: true,
                                 tenantId: true,
                                 name: true,
+                                description: true,
                                 parts: {
                                     select: {
                                         id: true,
                                         tenantId: true,
                                         label: true,
+                                        description: true,
                                         widgetId: true,
                                     },
                                 },
@@ -350,6 +360,7 @@ async function seedBenchmarkWidgets(
                 id: string;
                 tenantId: string;
                 name: string;
+                description: string;
                 parts: BenchmarkPart[];
             }> = [];
 
@@ -374,6 +385,7 @@ async function seedBenchmarkWidgets(
                     id: widget.id,
                     tenantId: widget.tenantId,
                     initialName: widget.name,
+                    description: widget.description,
                     parts: widget.parts ?? [],
                 });
             }

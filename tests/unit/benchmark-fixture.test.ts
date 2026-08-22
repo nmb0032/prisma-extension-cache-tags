@@ -1,8 +1,20 @@
 import { describe, expect, test, vi } from 'vitest';
-import { deleteRedisNamespace, validateBenchmarkKeyPrefix } from '../../tests/load/benchmark-fixture';
+import {
+    BENCHMARK_PART_DESCRIPTION,
+    BENCHMARK_WIDGET_DESCRIPTION,
+    deleteRedisNamespace,
+    validateBenchmarkKeyPrefix,
+} from '../../tests/load/benchmark-fixture';
 import type { createTestRedisClient } from '../../tests/support/service-preflight';
 
 describe('benchmark fixture Redis namespaces', () => {
+    test('provides deterministic production-sized descriptions for both fixture models', () => {
+        expect(BENCHMARK_WIDGET_DESCRIPTION).toHaveLength(512);
+        expect(BENCHMARK_PART_DESCRIPTION).toHaveLength(256);
+        expect(BENCHMARK_WIDGET_DESCRIPTION).toBe('widget benchmark payload '.repeat(22).slice(0, 512));
+        expect(BENCHMARK_PART_DESCRIPTION).toBe('part benchmark payload '.repeat(16).slice(0, 256));
+    });
+
     test.each([
         '',
         'prismaCacheTags:benchmark:',

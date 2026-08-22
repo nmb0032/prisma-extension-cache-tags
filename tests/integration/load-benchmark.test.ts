@@ -39,6 +39,8 @@ describe('isolated model-backed benchmark fixture', () => {
 
         try {
             expect(fixture.widgetsByWorker.flat()).toHaveLength(4);
+            expect(fixture.readCorpus.widgets[0]?.description).toHaveLength(512);
+            expect(fixture.readCorpus.parts[0]?.description).toHaveLength(256);
             expect(
                 await fixture.clients[0]!.part.count({
                     where: { tenantId: { in: fixture.tenantIds } },
@@ -208,6 +210,7 @@ describe('isolated model-backed benchmark fixture', () => {
             expect(comparison.plan.some((operation) => operation.kind === 'partUnique')).toBe(true);
             expect(comparison.plan.some((operation) => operation.kind === 'widgetList')).toBe(true);
             expect(comparison.plan.some((operation) => operation.kind === 'partList')).toBe(true);
+            expect(comparison.plan.some((operation) => operation.kind === 'widgetAggregate')).toBe(true);
 
             const rawA = comparison.phases.rawA;
             const cold = comparison.phases.cold;

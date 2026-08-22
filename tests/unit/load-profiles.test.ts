@@ -32,13 +32,14 @@ describe('benchmark profiles', () => {
     });
 
     test('defaults to the quick profile without preserving data', () => {
-        expect(parseBenchmarkArgs([])).toEqual({ profile: BENCHMARK_PROFILES.quick, preserve: false });
+        expect(parseBenchmarkArgs([])).toEqual({ profile: BENCHMARK_PROFILES.quick, preserve: false, workload: 'standard' });
     });
 
     test('parses a separate stress profile value and preserve flag', () => {
         expect(parseBenchmarkArgs(['--profile', 'stress', '--preserve'])).toEqual({
             profile: BENCHMARK_PROFILES.stress,
             preserve: true,
+            workload: 'standard',
         });
     });
 
@@ -46,7 +47,21 @@ describe('benchmark profiles', () => {
         expect(parseBenchmarkArgs(['--profile=stress'])).toEqual({
             profile: BENCHMARK_PROFILES.stress,
             preserve: false,
+            workload: 'standard',
         });
+    });
+
+    test.each(['standard', 'list-heavy', 'zipfian'] as const)('parses %s workload selection', (workload) => {
+        expect(parseBenchmarkArgs(['--workload', workload]).workload).toBe(workload);
+        expect(parseBenchmarkArgs([`--workload=${workload}`]).workload).toBe(workload);
+    });
+
+    test('rejects an unsupported workload before any service setup', () => {
+        expect(() => parseBenchmarkArgs(['--workload', 'random'])).toThrow('Unknown benchmark workload: random');
+    });
+
+    test('rejects a workload flag without a value', () => {
+        expect(() => parseBenchmarkArgs(['--workload'])).toThrow(/--workload/);
     });
 
     test('rejects a profile flag without a value', () => {

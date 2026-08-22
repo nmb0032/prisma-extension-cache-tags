@@ -5,9 +5,9 @@ The `tests/load` directory contains two benchmarks with different purposes:
 - `test:benchmark:invalidation` is a synthetic Redis-only keyspace-scaling
   microbenchmark. It does not exercise Prisma or PostgreSQL.
 - `test:benchmark:load` is a model-backed workload that runs real cached Prisma
-  `Widget` and `Part` unique/list operations against PostgreSQL and Redis. Its
-  shared read corpus also probes distributed cold-list stampede behavior and
-  reads widget writes back through another client.
+  `Widget` and `Part` unique/list/aggregate operations against PostgreSQL and
+  Redis. Its shared read corpus also probes distributed cold-list stampede
+  behavior and reads widget writes back through another client.
 
 ## Synthetic invalidation benchmark
 
@@ -47,21 +47,30 @@ setup described in [CONTRIBUTING.md](../../CONTRIBUTING.md). It uses the
 
 ```bash
 pnpm test:benchmark:load
+pnpm test:benchmark:load -- --profile quick
 pnpm test:benchmark:load -- --profile stress
+pnpm test:benchmark:load -- --workload list-heavy
+pnpm test:benchmark:load -- --workload zipfian
+pnpm test:benchmark:load -- --profile stress --workload list-heavy
 pnpm test:benchmark:load -- --preserve
 ```
 
 It first discards one untimed raw warm-up and then reports finite raw A, cold,
 warm, and raw B phases. The deterministic plan is built from the shared corpus
-and covers `Widget.findUnique`, `Part.findUnique`, `Widget.findMany`, and
-`Part.findMany`. Raw reads set `cache.enabled: false`; cold reads run once after
-clearing only the validated current-run namespace; warm reads repeat the exact
-plan without cleanup. The same client concurrency is used for every measured
-phase, results are checked by deterministic digest, and each row reports
-completed reads, elapsed time, throughput, p50/p95/p99 latency, cache
-hits/misses/hit rate, and database queries. The report calculates symmetric raw
-A/B drift. At no more than 10% drift, speedups use the mean raw throughput;
-otherwise comparative speedups render as `unstable`.
+and covers `Widget.findUnique`, `Part.findUnique`, `Widget.findMany`,
+`Part.findMany`, and `Widget.aggregate`. Raw reads set `cache.enabled: false`;
+cold reads run once after clearing only the validated current-run namespace;
+warm reads repeat the exact plan without cleanup. The same client concurrency is
+used for every measured phase, results are checked by deterministic digest, and
+each row reports completed reads, elapsed time, throughput, p50/p95/p99
+latency, cache hits/misses/hit rate, database queries, and event-loop
+utilization. The report calculates symmetric raw A/B drift. At no more than 10%
+drift, speedups use the mean raw throughput; otherwise comparative speedups
+render as `unstable`.
+
+Each phase also prints a separate per-query-kind table for
+`widgetUnique`, `partUnique`, `widgetList`, `partList`, and
+`widgetAggregate`, so an aggregate row cannot hide a regressing kind.
 
 Next, 32 independent clients start the same cold-key read behind a shared
 barrier. Quick runs execute 10 rounds and stress runs execute 30. Each round
@@ -80,5 +89,29 @@ the command. Normal cleanup removes only the run-specific database rows and
 Redis namespace. `--preserve` skips cleanup and prints the run ID, tenant IDs,
 and Redis key prefix for inspection. Warm-up requests are sampled and bounded,
 and each benchmark Prisma client is capped at one PostgreSQL connection so the
-stress profile stays within its concurrency budget. Redis command counts and
-Node event-loop utilization are not yet instrumented for model-backed phases.
+stress profile stays within its concurrency budget.
+
+Before workers start, isolated warm-read, cold-read, write, and multi-tag
+invalidation probes capture Redis `INFO commandstats` deltas. These are
+process-wide counters rather than namespace-local counts. Every measured phase,
+including command probes, contention, and mixed correctness, reports event-loop
+active/idle milliseconds and utilization.
+
+`standard` is intentionally unfavorable to caching because it contains mostly
+unique reads and writes. `list-heavy` uses `take: 100`, deterministic
+512-character Widget and 256-character Part descriptions, and at least 70% list
+or aggregate reads. `zipfian` uses a seeded PRNG with exponent 1.1, repeated
+hot keys, and an approximately 80% hottest-20% traffic target (reported with a
+documented ±10% tolerance). Both workloads use the same finite raw/cold/warm
+plan and the contention phase checks equal results with bounded database work.
+
+To target a network-separated or latency-injected Redis, set `TEST_REDIS_URL`:
+
+```bash
+TEST_REDIS_URL=redis://benchmark-redis.example:6379 pnpm test:benchmark:load -- --workload zipfian
+```
+
+This external endpoint is not an automated test dependency. Host hardware,
+service versions, topology, network distance, and background load affect
+measurements; local output must not be published as universal package
+performance claims.

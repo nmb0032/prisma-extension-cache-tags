@@ -22,6 +22,7 @@ function createClient(states: Map<string, { name: string }>) {
                     name: states.get('widget-0')!.name,
                 },
             ]),
+            aggregate: vi.fn(async () => ({ _count: { _all: 1 } })),
             update: vi.fn(async ({ where, data }: { where: { id: string }; data: { name: string } }) => {
                 const state = states.get(where.id)!;
                 state.name = data.name;
@@ -152,5 +153,29 @@ describe('model-backed workload', () => {
 
         expect(clients[1]!.widget.findMany).toHaveBeenCalledTimes(1);
         expect(clients[0]!.widget.findMany).toHaveBeenCalledTimes(1);
+    });
+
+    test('routes list-heavy reads to aggregate operations with the larger list contract', async () => {
+        const states = new Map([
+            ['widget-0', { name: 'initial' }],
+            ['widget-1', { name: 'initial-1' }],
+        ]);
+        const clients = [createClient(states), createClient(states)];
+        const fixture = createFixture(clients);
+
+        await runModelWorkload(fixture, baseProfile, new BenchmarkMetrics(), {
+            now: () => 0,
+            random: () => 0.2,
+            maxOperationsPerWorker: 1,
+            workload: 'list-heavy',
+        });
+
+        expect(clients[0]!.widget.aggregate).toHaveBeenCalledTimes(1);
+        expect(clients[1]!.widget.aggregate).toHaveBeenCalledTimes(1);
+        expect(clients[0]!.widget.aggregate).toHaveBeenCalledWith(
+            expect.objectContaining({
+                where: { tenantId: 'tenant-0' },
+            }),
+        );
     });
 });

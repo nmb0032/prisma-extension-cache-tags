@@ -15,7 +15,13 @@ import {
     type RedisCommandCounts,
     type RedisCommandPhaseMeasurement,
 } from './query-kind-metrics';
-import { calculateHotKeyShare, ZIPFIAN_EXPONENT } from './realistic-workload';
+import {
+    calculateHotIdentityShare,
+    createRealisticWorkloadProfile,
+    getZipfianHotIdentities,
+    ZIPFIAN_EXPONENT,
+    type RealisticWorkloadOperation,
+} from './realistic-workload';
 import { performance } from 'node:perf_hooks';
 import {
     checkPostgresReachability,
@@ -27,6 +33,7 @@ import {
     formatError,
     formatServiceUnavailable,
     logError,
+    redactServiceUrl,
     TEST_REDIS_URL,
 } from '../support/service-preflight';
 
@@ -174,6 +181,7 @@ async function runRedisCommandProbes(fixture: BenchmarkFixture): Promise<RedisCo
 
 function printRedisCommandProbeReport(report: RedisCommandProbeReport): void {
     console.log('Redis command deltas (process-wide INFO commandstats counters; not namespace-local):');
+    console.log('Command columns: get/mget/set/eval/evalsha/incr (nested Lua)/incrby (fallback)/expire.');
     console.table(
         Object.entries(report).map(([phase, measurement]) => ({
             phase,
@@ -192,6 +200,7 @@ function formatCommandCounts(counts: RedisCommandCounts): Record<string, number>
         set: counts.set,
         eval: counts.eval,
         evalsha: counts.evalsha,
+        incr: counts.incr,
         incrby: counts.incrby,
         expire: counts.expire,
     };
@@ -200,7 +209,7 @@ function formatCommandCounts(counts: RedisCommandCounts): Record<string, number>
 function printReadComparisonReport(
     comparison: Awaited<ReturnType<typeof runReadOnlyComparison>>,
     workload: BenchmarkWorkloadName,
-    hotKeyIds: readonly string[],
+    hotIdentities: readonly RealisticWorkloadOperation[],
 ): void {
     console.log(`Read-only cache comparison for workload ${workload} (same deterministic plan and concurrency):`);
     console.table([
@@ -233,12 +242,8 @@ function printReadComparisonReport(
     } else if (workload === 'zipfian') {
         console.log(
             `Zipfian distribution: exponent=${ZIPFIAN_EXPONENT.toFixed(1)}, ` +
-                `hottest 20% widget-key share=${(
-                    calculateHotKeyShare(
-                        comparison.plan,
-                        hotKeyIds.length,
-                        hotKeyIds,
-                    ) * 100
+                `hottest 20% all-identity share=${(
+                    calculateHotIdentityShare(comparison.plan, hotIdentities) * 100
                 ).toFixed(1)}% ` +
                 '(target 80.0% +/- 10.0%).',
         );
@@ -265,7 +270,10 @@ async function main(): Promise<void> {
     try {
         console.log(`Benchmark profile: ${profile.name}`);
         console.log(`Benchmark workload: ${workload}`);
-        console.log(`Environment: TEST_DATABASE_URL=${TEST_DATABASE_URL}; TEST_REDIS_URL=${TEST_REDIS_URL}`);
+        console.log(
+            `Environment: TEST_DATABASE_URL=${redactServiceUrl(TEST_DATABASE_URL)}; ` +
+                `TEST_REDIS_URL=${redactServiceUrl(TEST_REDIS_URL)}`,
+        );
         console.log(`Run namespace: ${fixture.keyPrefix}`);
         if (preserve) {
             printPreservedResources(fixture);
@@ -282,9 +290,10 @@ async function main(): Promise<void> {
         printReadComparisonReport(
             comparison,
             workload,
-            fixture.readCorpus.widgets
-                .slice(0, Math.ceil(fixture.readCorpus.widgets.length * 0.2))
-                .map((widget) => widget.id),
+            getZipfianHotIdentities(
+                fixture.readCorpus,
+                createRealisticWorkloadProfile('zipfian'),
+            ),
         );
 
         const contentionTarget =

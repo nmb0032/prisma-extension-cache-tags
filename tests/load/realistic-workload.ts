@@ -16,6 +16,16 @@ export type RealisticWorkloadOperation =
     | { kind: 'partList'; tenantId: string; take?: number }
     | { kind: 'widgetAggregate'; tenantId: string };
 
+export interface ZipfianSampler {
+    readonly cdf: readonly number[];
+    sample(random: () => number): number;
+}
+
+export interface ZipfianOperationStream {
+    readonly sampler: ZipfianSampler;
+    next(): RealisticWorkloadOperation;
+}
+
 export const ZIPFIAN_EXPONENT = 1.1;
 export const REALISTIC_WORKLOAD_PROFILES: Record<RealisticWorkloadProfile['name'], RealisticWorkloadProfile> = {
     'list-heavy': {
@@ -33,6 +43,7 @@ export const REALISTIC_WORKLOAD_PROFILES: Record<RealisticWorkloadProfile['name'
         hotKeyProbability: 0.8,
     },
 };
+const ZIPFIAN_SAMPLER_CACHE = new Map<string, ZipfianSampler>();
 
 export function createRealisticWorkloadProfile(
     name: RealisticWorkloadProfile['name'],
@@ -95,31 +106,154 @@ export function buildZipfianPlan(
     if (profile.name !== 'zipfian') {
         throw new Error('buildZipfianPlan requires the zipfian profile');
     }
-    if (corpus.widgets.length === 0 || corpus.parts.length === 0) {
-        throw new Error('The benchmark read corpus must contain widgets and parts');
-    }
-    if (corpus.tenantIds.length === 0) {
-        throw new Error('The benchmark read corpus must contain at least one tenant');
-    }
 
-    const random = createSeededPrng(seed);
-    const plan: RealisticWorkloadOperation[] = [];
-    for (let index = 0; index < profile.operations; index += 1) {
-        const rank = selectZipfianRank(random, corpus.widgets.length, ZIPFIAN_EXPONENT, profile.hotKeyProbability);
-        if (index % 10 === 0) {
-            const tenantId = corpus.tenantIds[rank % corpus.tenantIds.length]!;
-            plan.push({ kind: 'widgetAggregate', tenantId });
-        } else if (index % 10 === 1) {
-            const tenantId = corpus.tenantIds[rank % corpus.tenantIds.length]!;
-            plan.push({ kind: 'widgetList', tenantId, take: profile.listTake });
-        } else if (index % 10 === 2) {
-            const part = corpus.parts[rank % corpus.parts.length]!;
-            plan.push({ kind: 'partUnique', partId: part.id });
-        } else {
-            plan.push({ kind: 'widgetUnique', widgetId: corpus.widgets[rank]!.id });
+    const stream = createZipfianOperationStream(corpus, profile, seed);
+    return Array.from({ length: profile.operations }, () => stream.next());
+}
+
+export function buildZipfianIdentitySet(
+    corpus: BenchmarkReadCorpus,
+    profile: RealisticWorkloadProfile,
+): RealisticWorkloadOperation[] {
+    if (profile.name !== 'zipfian') {
+        throw new Error('buildZipfianIdentitySet requires the zipfian profile');
+    }
+    validateCorpus(corpus);
+
+    const identityGroups: RealisticWorkloadOperation[][] = [
+        corpus.widgets.map((widget) => ({ kind: 'widgetUnique' as const, widgetId: widget.id })),
+        corpus.parts.map((part) => ({ kind: 'partUnique' as const, partId: part.id })),
+        corpus.tenantIds.map((tenantId) => ({ kind: 'widgetList' as const, tenantId, take: profile.listTake })),
+        corpus.tenantIds.map((tenantId) => ({ kind: 'partList' as const, tenantId, take: profile.listTake })),
+        corpus.tenantIds.map((tenantId) => ({ kind: 'widgetAggregate' as const, tenantId })),
+    ];
+    const identities: RealisticWorkloadOperation[] = [];
+    const seen = new Set<string>();
+    const maxGroupLength = Math.max(...identityGroups.map((group) => group.length));
+
+    for (let index = 0; index < maxGroupLength; index += 1) {
+        for (const group of identityGroups) {
+            const operation = group[index];
+            if (operation === undefined) {
+                continue;
+            }
+            const identity = getWorkloadOperationIdentity(operation);
+            if (!seen.has(identity)) {
+                seen.add(identity);
+                identities.push(operation);
+            }
         }
     }
-    return plan;
+
+    return identities;
+}
+
+export function createZipfianSampler(
+    keyCount: number,
+    exponent = ZIPFIAN_EXPONENT,
+    hotKeyProbability = 0.8,
+): ZipfianSampler {
+    validateZipfianArguments(keyCount, exponent, hotKeyProbability);
+
+    const weights = Array.from({ length: keyCount }, (_, rank) => (rank + 1) ** -exponent);
+    const hotKeyCount = Math.max(1, Math.ceil(keyCount * 0.2));
+    const hotWeight = weights.slice(0, hotKeyCount).reduce((total, weight) => total + weight, 0);
+    const coldWeight = weights.slice(hotKeyCount).reduce((total, weight) => total + weight, 0);
+    const cdf: number[] = [];
+    let cumulative = 0;
+
+    for (const [rank, weight] of weights.entries()) {
+        const isHot = rank < hotKeyCount;
+        const segmentProbability = isHot ? hotKeyProbability : 1 - hotKeyProbability;
+        const segmentWeight = isHot ? hotWeight : coldWeight;
+        cumulative += segmentWeight === 0 ? 0 : (segmentProbability * weight) / segmentWeight;
+        cdf.push(cumulative);
+    }
+    cdf[cdf.length - 1] = 1;
+
+    const frozenCdf = Object.freeze(cdf);
+    return Object.freeze({
+        cdf: frozenCdf,
+        sample(random: () => number): number {
+            const target = random();
+            if (!Number.isFinite(target) || target < 0 || target > 1) {
+                throw new Error('sample must be between 0 and 1');
+            }
+            if (target === 1) {
+                return frozenCdf.length - 1;
+            }
+
+            let low = 0;
+            let high = frozenCdf.length - 1;
+            while (low < high) {
+                const middle = Math.floor((low + high) / 2);
+                if (frozenCdf[middle]! > target) {
+                    high = middle;
+                } else {
+                    low = middle + 1;
+                }
+            }
+            return low;
+        },
+    });
+}
+
+export function createZipfianOperationStream(
+    corpus: BenchmarkReadCorpus,
+    profile: RealisticWorkloadProfile,
+    seed: number | string,
+    sampler?: ZipfianSampler,
+): ZipfianOperationStream {
+    const identities = buildZipfianIdentitySet(corpus, profile);
+    const selectedSampler = sampler ?? getCachedZipfianSampler(profile, identities.length);
+    return createZipfianOperationStreamFromIdentities(identities, selectedSampler, seed);
+}
+
+function createZipfianOperationStreamFromIdentities(
+    identities: readonly RealisticWorkloadOperation[],
+    sampler: ZipfianSampler,
+    seed: number | string,
+): ZipfianOperationStream {
+    if (identities.length !== sampler.cdf.length) {
+        throw new Error('Zipfian sampler size does not match the generated identity set');
+    }
+    const random = createSeededPrng(seed);
+
+    return {
+        sampler,
+        next(): RealisticWorkloadOperation {
+            return identities[sampler.sample(random)]!;
+        },
+    };
+}
+
+export function createZipfianWorkerStreams(
+    corpus: BenchmarkReadCorpus,
+    profile: RealisticWorkloadProfile,
+    workerCount: number,
+    seed: number | string,
+): ZipfianOperationStream[] {
+    if (!Number.isInteger(workerCount) || workerCount < 1) {
+        throw new Error('workerCount must be a positive integer');
+    }
+
+    const identities = buildZipfianIdentitySet(corpus, profile);
+    const sampler = getCachedZipfianSampler(profile, identities.length);
+    return Array.from({ length: workerCount }, (_, workerIndex) =>
+        createZipfianOperationStreamFromIdentities(
+            identities,
+            sampler,
+            `${String(seed)}:worker:${workerIndex}`,
+        ),
+    );
+}
+
+export function getZipfianHotIdentities(
+    corpus: BenchmarkReadCorpus,
+    profile: RealisticWorkloadProfile,
+): RealisticWorkloadOperation[] {
+    const identities = buildZipfianIdentitySet(corpus, profile);
+    return identities.slice(0, Math.max(1, Math.ceil(identities.length * 0.2)));
 }
 
 export function createSeededPrng(seed: number | string): () => number {
@@ -138,24 +272,33 @@ export function selectZipfianRank(
     exponent = ZIPFIAN_EXPONENT,
     hotKeyProbability = 0.8,
 ): number {
-    if (!Number.isInteger(keyCount) || keyCount < 1) {
-        throw new Error('keyCount must be a positive integer');
-    }
-    if (!Number.isFinite(exponent) || exponent <= 0) {
-        throw new Error('exponent must be greater than 0');
-    }
-    if (!Number.isFinite(hotKeyProbability) || hotKeyProbability < 0 || hotKeyProbability > 1) {
-        throw new Error('hotKeyProbability must be between 0 and 1');
-    }
+    return getCachedZipfianSampler({ hotKeyProbability }, keyCount, exponent).sample(random);
+}
 
-    const hotKeyCount = Math.max(1, Math.ceil(keyCount * 0.2));
-    const hot = random() < hotKeyProbability;
-    const start = hot ? 0 : hotKeyCount;
-    const end = hot ? hotKeyCount : keyCount;
-    if (start >= end) {
-        return keyCount - 1;
+export function getWorkloadOperationIdentity(operation: RealisticWorkloadOperation): string {
+    switch (operation.kind) {
+        case 'widgetUnique':
+            return JSON.stringify([operation.kind, operation.widgetId]);
+        case 'partUnique':
+            return JSON.stringify([operation.kind, operation.partId]);
+        case 'widgetList':
+            return JSON.stringify([operation.kind, operation.tenantId, operation.take ?? null]);
+        case 'partList':
+            return JSON.stringify([operation.kind, operation.tenantId, operation.take ?? null]);
+        case 'widgetAggregate':
+            return JSON.stringify([operation.kind, operation.tenantId]);
     }
-    return start + weightedRank(random, start, end, exponent);
+}
+
+export function calculateHotIdentityShare(
+    plan: readonly RealisticWorkloadOperation[],
+    hotIdentities: readonly RealisticWorkloadOperation[],
+): number {
+    if (plan.length === 0 || hotIdentities.length === 0) {
+        return 0;
+    }
+    const hotKeys = new Set(hotIdentities.map(getWorkloadOperationIdentity));
+    return plan.filter((operation) => hotKeys.has(getWorkloadOperationIdentity(operation))).length / plan.length;
 }
 
 export function calculateHotKeyShare(
@@ -182,23 +325,41 @@ export function queryKindOf(operation: RealisticWorkloadOperation): QueryKind {
     return operation.kind;
 }
 
-function weightedRank(random: () => number, start: number, end: number, exponent: number): number {
-    const weights: number[] = [];
-    let total = 0;
-    for (let rank = start + 1; rank <= end; rank += 1) {
-        const weight = rank ** -exponent;
-        weights.push(weight);
-        total += weight;
+function validateCorpus(corpus: BenchmarkReadCorpus): void {
+    if (corpus.widgets.length === 0 || corpus.parts.length === 0) {
+        throw new Error('The benchmark read corpus must contain widgets and parts');
+    }
+    if (corpus.tenantIds.length === 0) {
+        throw new Error('The benchmark read corpus must contain at least one tenant');
+    }
+}
+
+function validateZipfianArguments(keyCount: number, exponent: number, hotKeyProbability: number): void {
+    if (!Number.isInteger(keyCount) || keyCount < 1) {
+        throw new Error('keyCount must be a positive integer');
+    }
+    if (!Number.isFinite(exponent) || exponent <= 0) {
+        throw new Error('exponent must be greater than 0');
+    }
+    if (!Number.isFinite(hotKeyProbability) || hotKeyProbability < 0 || hotKeyProbability > 1) {
+        throw new Error('hotKeyProbability must be between 0 and 1');
+    }
+}
+
+function getCachedZipfianSampler(
+    profile: Pick<RealisticWorkloadProfile, 'hotKeyProbability'>,
+    keyCount: number,
+    exponent = ZIPFIAN_EXPONENT,
+): ZipfianSampler {
+    const key = `${keyCount}:${exponent}:${profile.hotKeyProbability}`;
+    const cached = ZIPFIAN_SAMPLER_CACHE.get(key);
+    if (cached !== undefined) {
+        return cached;
     }
 
-    let target = random() * total;
-    for (const [index, weight] of weights.entries()) {
-        target -= weight;
-        if (target <= 0) {
-            return index;
-        }
-    }
-    return Math.max(0, weights.length - 1);
+    const sampler = createZipfianSampler(keyCount, exponent, profile.hotKeyProbability);
+    ZIPFIAN_SAMPLER_CACHE.set(key, sampler);
+    return sampler;
 }
 
 function hashSeed(seed: string): number {

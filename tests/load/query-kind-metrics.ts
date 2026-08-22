@@ -36,7 +36,7 @@ export interface EventLoopSnapshot {
     idle: number;
 }
 
-export type RedisCommandName = 'get' | 'mget' | 'set' | 'eval' | 'evalsha' | 'incrby' | 'expire';
+export type RedisCommandName = 'get' | 'mget' | 'set' | 'eval' | 'evalsha' | 'incr' | 'incrby' | 'expire';
 export type RedisCommandCounts = Record<RedisCommandName, number>;
 export interface RedisCommandstatsClient {
     sendCommand(command: string[]): Promise<unknown>;
@@ -58,6 +58,7 @@ const REDIS_COMMANDS: readonly RedisCommandName[] = [
     'set',
     'eval',
     'evalsha',
+    'incr',
     'incrby',
     'expire',
 ];
@@ -138,7 +139,7 @@ export function parseRedisCommandstats(info: string): RedisCommandCounts {
     const counts = createEmptyRedisCommandstats();
 
     for (const line of info.split(/\r?\n/)) {
-        const match = /^cmdstat_(get|mget|set|eval|evalsha|incrby|expire):(.+)$/.exec(line.trim());
+        const match = /^cmdstat_(get|mget|set|eval|evalsha|incrby|incr|expire):(.+)$/.exec(line.trim());
         if (!match) {
             continue;
         }
@@ -183,11 +184,11 @@ export async function measureRedisCommandPhase(
     client: RedisCommandstatsClient,
     operation: () => Promise<void>,
 ): Promise<RedisCommandPhaseMeasurement> {
-    const eventLoopStart = performance.eventLoopUtilization();
     const before = await captureRedisCommandstats(client);
+    const eventLoopStart = performance.eventLoopUtilization();
     await operation();
-    const after = await captureRedisCommandstats(client);
     const eventLoopDelta = performance.eventLoopUtilization(eventLoopStart);
+    const after = await captureRedisCommandstats(client);
     return {
         before,
         after,

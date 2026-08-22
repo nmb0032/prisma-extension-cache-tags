@@ -46,10 +46,27 @@ export async function checkRedisReachability(url: string = TEST_REDIS_URL): Prom
 
 export function formatServiceUnavailable(service: string, url: string, environmentVariable: string): string {
     return [
-        `Cannot reach ${service} at ${url}`,
+        `Cannot reach ${service} at ${redactServiceUrl(url)}`,
         'Start the local services first:  pnpm db:up',
         `(or set ${environmentVariable} to point at another instance)`,
     ].join('\n');
+}
+
+export function redactServiceUrl(value: string): string {
+    try {
+        const url = new URL(value);
+        url.username = '';
+        url.password = '';
+        url.hash = '';
+        for (const key of url.searchParams.keys()) {
+            if (/(?:user|pass|token|secret|key)/i.test(key)) {
+                url.searchParams.set(key, '[REDACTED]');
+            }
+        }
+        return url.toString();
+    } catch {
+        return '[redacted service URL]';
+    }
 }
 
 export function formatError(error: unknown, seen = new Set<unknown>()): string {

@@ -14,8 +14,9 @@ The `tests/load` directory contains two benchmarks with different purposes:
 This benchmark measures invalidation latency while the Redis keyspace grows
 from 1,000 to 100,000 cached keys. It seeds each keyspace with cached query
 values, performs 200 invalidations with the real node-redis adapter, and
-records p50 and p99 latency. Redis command statistics also verify that each
-invalidation produces exactly one `INCRBY`, regardless of keyspace size.
+records p50 and p99 latency. Redis command statistics verify one logical
+increment per invalidation: optimized `EVALSHA` calls contain a nested `INCR`,
+while the command fallback reports `INCRBY`.
 
 Run it against a disposable Redis instance:
 
@@ -37,7 +38,7 @@ command-count measurements.
 
 The benchmark passes when p50 invalidation latency grows by no more than 2x
 across the 100x keyspace increase. It exits non-zero when that threshold is
-exceeded or when the observed Redis `INCRBY` count is not fixed.
+exceeded or when the observed logical `INCR` plus `INCRBY` count is not fixed.
 
 ## Model-backed load benchmark
 
@@ -93,17 +94,20 @@ stress profile stays within its concurrency budget.
 
 Before workers start, isolated warm-read, cold-read, write, and multi-tag
 invalidation probes capture Redis `INFO commandstats` deltas. These are
-process-wide counters rather than namespace-local counts. Every measured phase,
-including command probes, contention, and mixed correctness, reports event-loop
-active/idle milliseconds and utilization.
+process-wide counters rather than namespace-local counts. The command columns
+are `get`, `mget`, `set`, `eval`, `evalsha`, nested `incr`, fallback `incrby`,
+and `expire`; multi-tag invalidation reports the nested logical increment count.
+Every measured phase, including command probes, contention, and mixed
+correctness, reports event-loop active/idle milliseconds and utilization.
 
 `standard` is intentionally unfavorable to caching because it contains mostly
 unique reads and writes. `list-heavy` uses `take: 100`, deterministic
 512-character Widget and 256-character Part descriptions, and at least 70% list
-or aggregate reads. `zipfian` uses a seeded PRNG with exponent 1.1, repeated
-hot keys, and an approximately 80% hottest-20% traffic target (reported with a
-documented ±10% tolerance). Both workloads use the same finite raw/cold/warm
-plan and the contention phase checks equal results with bounded database work.
+or aggregate reads. `zipfian` uses a seeded PRNG with exponent 1.1, repeated identities across the
+complete five-kind query set, and an approximately 80% hottest-20% traffic
+target (reported with a documented ±10% tolerance). Both workloads use the same
+finite raw/cold/warm plan and the contention phase checks equal results with
+bounded database work.
 
 To target a network-separated or latency-injected Redis, set `TEST_REDIS_URL`:
 
@@ -114,4 +118,5 @@ TEST_REDIS_URL=redis://benchmark-redis.example:6379 pnpm test:benchmark:load -- 
 This external endpoint is not an automated test dependency. Host hardware,
 service versions, topology, network distance, and background load affect
 measurements; local output must not be published as universal package
-performance claims.
+performance claims. Service diagnostics redact credentials from valid endpoint
+URLs and replace malformed URLs with `[redacted service URL]`.

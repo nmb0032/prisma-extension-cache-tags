@@ -192,8 +192,8 @@ contention, and the mixed correctness phase.
 unique reads and writes. `list-heavy` uses `take: 100`, deterministic
 512-character Widget and 256-character Part descriptions, and at least 70%
 list/aggregate reads. `zipfian` uses a seeded PRNG, exponent 1.1, repeated hot
-keys, cold contention, and an approximately 80% hottest-20% traffic target
-(reported with a ±10% tolerance).
+keys across the complete five-kind query-identity set, cold contention, and an
+approximately 80% hottest-20% traffic target (reported with a ±10% tolerance).
 
 The `quick` profile is the default; `--profile stress` uses a larger dataset,
 more concurrency, and a longer measurement window for deliberate capacity
@@ -203,18 +203,23 @@ informational only, not statistical claims or CI thresholds; correctness
 failures remain fatal.
 
 The invalidation benchmark reports p50 and p99 invalidation latency by keyspace
-and verifies one Redis `EVALSHA` per optimized invalidation (or `INCRBY` in
-forced fallback mode). The blended model-backed report
+and verifies one logical increment per invalidation: optimized Redis `EVALSHA`
+contains a nested `INCR`, while forced fallback mode reports `INCRBY`. The
+blended model-backed report
 continues to include throughput, p50/p95/p99 latency, cache hit rate, database
 query count, errors, and freshness failures. The preceding comparison has its
 own rows and counters, so its read-only measurements do not alter the mixed
 workload report. A focused Redis `INFO commandstats` probe can isolate warm
-lookup, cold-owner, and multi-tag invalidation command deltas; `INFO` counters
-are process-wide, so reset and run each probe without concurrent traffic. A
+lookup, cold-owner, and multi-tag invalidation command deltas (including nested
+`INCR` versus fallback `INCRBY`); `INFO` counters are process-wide, so reset
+and run each probe without concurrent traffic. A
 network-separated or latency-injected Redis can be selected with
 `TEST_REDIS_URL`; this is external configuration, not an automated dependency.
 Hardware, service versions, topology, and background load affect results, so
 local numbers must not be presented as universal package performance claims.
+Service diagnostics redact URL userinfo and credential-like query values while
+retaining valid endpoint topology; malformed URLs are shown as
+`[redacted service URL]`.
 
 The model-backed benchmark normally removes only the current run's database rows
 and Redis namespace, and never flushes the Redis database. Pass `--preserve` to

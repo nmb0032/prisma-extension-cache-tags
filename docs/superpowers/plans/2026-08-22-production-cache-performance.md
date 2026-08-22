@@ -928,7 +928,7 @@ Report utilization percentage, active milliseconds, and idle milliseconds. Unit-
 Capture `INFO commandstats` before and after phases. Parse only required commands and scripts into:
 
 ```ts
-Record<'get' | 'mget' | 'set' | 'eval' | 'evalsha' | 'incrby' | 'expire', number>
+Record<'get' | 'mget' | 'set' | 'eval' | 'evalsha' | 'incr' | 'incrby' | 'expire', number>
 ```
 
 Report deltas per phase. Missing commandstat entries equal zero. Parser tests use fixed INFO text.
@@ -941,7 +941,11 @@ Add `description String @default("")` to `Widget` and `Part`. Seed a determinist
 
 - [ ] **Step 6: Add Zipfian workload**
 
-Implement deterministic rank selection with a seeded PRNG and exponent 1.1. The hottest 20% of keys must receive approximately 80% of generated reads within a documented tolerance.
+Implement deterministic rank selection with a seeded PRNG and exponent 1.1 over
+the complete five-kind query-identity set. Precompute one immutable CDF and
+select ranks with binary search; independent workers use independent seeded
+streams. The hottest 20% of identities must receive approximately 80% of
+generated reads within a documented tolerance.
 
 The phase includes cold contention and warm repeated-key behavior. Assert all clients return equivalent digests and stampede protection limits database queries.
 

@@ -1,7 +1,9 @@
-import { describe, expect, test } from 'vitest';
+import { performance } from 'node:perf_hooks';
+import { describe, expect, test, vi } from 'vitest';
 import {
     calculateEventLoopSummary,
     diffRedisCommandstats,
+    measureRedisCommandPhase,
     measureRedisCommandstats,
     parseRedisCommandstats,
     QueryKindMetrics,
@@ -79,6 +81,7 @@ describe('query-kind metrics', () => {
                 '# Commandstats',
                 'cmdstat_get:calls=10,usec=100,usec_per_call=10',
                 'cmdstat_evalsha:calls=2,usec=50,usec_per_call=25',
+                'cmdstat_incr:calls=7,usec=70,usec_per_call=10',
                 'cmdstat_incrby:calls=4,usec=40,usec_per_call=10',
             ].join('\n'),
         );
@@ -88,6 +91,7 @@ describe('query-kind metrics', () => {
                 'cmdstat_get:calls=15,usec=100,usec_per_call=6',
                 'cmdstat_evalsha:calls=3,usec=50,usec_per_call=16',
                 'cmdstat_set:calls=8,usec=40,usec_per_call=5',
+                'cmdstat_incr:calls=12,usec=120,usec_per_call=10',
                 'cmdstat_expire:calls=5,usec=40,usec_per_call=8',
             ].join('\n'),
         );
@@ -98,6 +102,7 @@ describe('query-kind metrics', () => {
             set: 0,
             eval: 0,
             evalsha: 2,
+            incr: 7,
             incrby: 4,
             expire: 0,
         });
@@ -107,6 +112,7 @@ describe('query-kind metrics', () => {
             set: 8,
             eval: 0,
             evalsha: 1,
+            incr: 5,
             incrby: -4,
             expire: 5,
         });
@@ -125,5 +131,54 @@ describe('query-kind metrics', () => {
 
         expect(measurement.delta.get).toBe(1);
         expect(measurement.delta.mget).toBe(0);
+    });
+
+    test('measures event-loop utilization only around the operation, excluding delayed INFO calls', async () => {
+        const events: string[] = [];
+        const eventLoopUtilization = vi.spyOn(performance, 'eventLoopUtilization').mockImplementation((start) => {
+            if (start === undefined) {
+                events.push('elu-start');
+                return { active: 10, idle: 20, utilization: 1 / 3 };
+            }
+
+            events.push('elu-end');
+            return { active: 4, idle: 6, utilization: 0.4 };
+        });
+        const responses = ['cmdstat_get:calls=10', 'cmdstat_get:calls=11'];
+        const client = {
+            sendCommand: async () => {
+                events.push('info-start');
+                await new Promise<void>((resolve) => setTimeout(resolve, 0));
+                events.push('info-end');
+                return responses.shift() ?? '';
+            },
+        };
+
+        try {
+            const measurement = await measureRedisCommandPhase(client, async () => {
+                events.push('operation-start');
+                await Promise.resolve();
+                events.push('operation-end');
+            });
+
+            expect(measurement.eventLoop).toEqual({
+                utilization: 0.4,
+                activeMs: 4,
+                idleMs: 6,
+            });
+        } finally {
+            eventLoopUtilization.mockRestore();
+        }
+
+        expect(events).toEqual([
+            'info-start',
+            'info-end',
+            'elu-start',
+            'operation-start',
+            'operation-end',
+            'elu-end',
+            'info-start',
+            'info-end',
+        ]);
     });
 });

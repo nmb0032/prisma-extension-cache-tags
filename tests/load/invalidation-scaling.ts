@@ -14,6 +14,7 @@ const REDIS_URL = TEST_REDIS_URL;
 const KEYSPACE_SIZES = [1_000, 10_000, 100_000];
 const INVALIDATIONS_PER_SIZE = 200;
 type RedisClient = ReturnType<typeof createClient<{}, {}, {}, 3, {}>>;
+type InvalidationCommand = 'evalsha' | 'incr' | 'incrby';
 
 async function seedKeyspace(client: RedisClient, count: number): Promise<void> {
     const batchSize = 1_000;
@@ -37,9 +38,16 @@ function parseCommandCalls(info: string, command: string): number {
     return Number(calls ?? 0);
 }
 
-async function getInvalidationCalls(client: RedisClient, command: 'evalsha' | 'incrby'): Promise<number> {
+async function getInvalidationCalls(
+    client: RedisClient,
+    commands: readonly InvalidationCommand[],
+): Promise<Record<InvalidationCommand, number>> {
     const info = await client.sendCommand(['INFO', 'commandstats']);
-    return parseCommandCalls(String(info), command);
+    const text = String(info);
+    return Object.fromEntries(commands.map((command) => [command, parseCommandCalls(text, command)])) as Record<
+        InvalidationCommand,
+        number
+    >;
 }
 
 async function main(): Promise<void> {
@@ -58,15 +66,16 @@ async function main(): Promise<void> {
 
         const config = normalizeConfig({ tenantKeys: ['tenantId'] });
         const adapter = createNodeRedisAdapter(client);
-        const invalidationCommand = adapter.optimized ? 'evalsha' : 'incrby';
         const results: Array<{ keyspace: number; p50: number; p99: number }> = [];
-        const incrementCalls: number[] = [];
+        const logicalIncrementCalls: number[] = [];
+        const optimizedIncrementCalls: number[] = [];
+        const fallbackIncrementCalls: number[] = [];
 
         for (const size of KEYSPACE_SIZES) {
             await client.flushDb();
             await seedKeyspace(client, size);
 
-            const callsBefore = await getInvalidationCalls(client, invalidationCommand);
+            const callsBefore = await getInvalidationCalls(client, ['evalsha', 'incr', 'incrby']);
             const durations: number[] = [];
             for (let index = 0; index < INVALIDATIONS_PER_SIZE; index += 1) {
                 const startedAt = process.hrtime.bigint();
@@ -74,8 +83,12 @@ async function main(): Promise<void> {
                 durations.push(Number(process.hrtime.bigint() - startedAt) / 1_000_000);
             }
 
-            const callsAfter = await getInvalidationCalls(client, invalidationCommand);
-            incrementCalls.push(callsAfter - callsBefore);
+            const callsAfter = await getInvalidationCalls(client, ['evalsha', 'incr', 'incrby']);
+            const incrCalls = callsAfter.incr - callsBefore.incr;
+            const incrbyCalls = callsAfter.incrby - callsBefore.incrby;
+            logicalIncrementCalls.push(incrCalls + incrbyCalls);
+            optimizedIncrementCalls.push(incrCalls);
+            fallbackIncrementCalls.push(incrbyCalls);
 
             durations.sort((a, b) => a - b);
             results.push({ keyspace: size, p50: percentile(durations, 50), p99: percentile(durations, 99) });
@@ -89,10 +102,17 @@ async function main(): Promise<void> {
             })),
         );
 
-        console.log(`Observed Redis ${invalidationCommand.toUpperCase()} calls per keyspace: ${incrementCalls.join(', ')}.`);
-        if (incrementCalls.some((calls) => calls !== INVALIDATIONS_PER_SIZE)) {
+        console.log(
+            `Observed Redis logical increment calls per keyspace (INCR + INCRBY): ${logicalIncrementCalls.join(', ')}.`,
+        );
+        console.log(
+            `Observed nested Redis INCR calls per keyspace: ${optimizedIncrementCalls.join(', ')}; ` +
+                `fallback INCRBY calls: ${fallbackIncrementCalls.join(', ')}.`,
+        );
+        if (logicalIncrementCalls.some((calls) => calls !== INVALIDATIONS_PER_SIZE)) {
             throw new Error(
-                `FAIL: expected exactly ${INVALIDATIONS_PER_SIZE} Redis ${invalidationCommand.toUpperCase()} calls per keyspace, observed ${incrementCalls.join(', ')}.`,
+                `FAIL: expected exactly ${INVALIDATIONS_PER_SIZE} logical Redis INCR/INCRBY calls per keyspace, ` +
+                    `observed ${logicalIncrementCalls.join(', ')}.`,
             );
         }
 

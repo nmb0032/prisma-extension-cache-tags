@@ -1,7 +1,13 @@
 import type { BenchmarkMetrics } from './benchmark-metrics';
 import type { BenchmarkFixture, BenchmarkPart, BenchmarkReadCorpus, BenchmarkWidget } from './benchmark-fixture';
 import { selectOperation, type BenchmarkProfile, type BenchmarkWorkloadName } from './profiles';
-import { createSeededPrng, selectZipfianRank } from './realistic-workload';
+import {
+    createRealisticWorkloadProfile,
+    createSeededPrng,
+    createZipfianWorkerStreams,
+    type RealisticWorkloadOperation,
+    type ZipfianOperationStream,
+} from './realistic-workload';
 
 const CACHE_TTL_SECONDS = 300;
 const MINIMUM_WARMUP_PASSES = 2;
@@ -110,9 +116,15 @@ export async function runModelWorkload(
 
     const now = options.now ?? Date.now;
     const workload = options.workload ?? 'standard';
-    const random =
-        options.random ??
-        (workload === 'zipfian' ? createSeededPrng(`${fixture.runId}:zipfian`) : Math.random);
+    const zipfianStreams =
+        workload === 'zipfian'
+            ? createZipfianWorkerStreams(
+                  fixture.readCorpus,
+                  createRealisticWorkloadProfile('zipfian'),
+                  fixture.clients.length,
+                  `${fixture.runId}:zipfian`,
+              )
+            : undefined;
     const deadline = now() + profile.durationMs;
 
     const workerResults = await Promise.allSettled(
@@ -128,8 +140,11 @@ export async function runModelWorkload(
                 metrics,
                 deadline,
                 now,
-                random,
+                workload === 'zipfian'
+                    ? createSeededPrng(`${fixture.runId}:zipfian:worker:${workerIndex}:control`)
+                    : (options.random ?? Math.random),
                 options.maxOperationsPerWorker,
+                zipfianStreams?.[workerIndex],
             ),
         ),
     );
@@ -205,6 +220,7 @@ async function runWorker(
     now: () => number,
     random: () => number,
     maxOperationsPerWorker: number | undefined,
+    zipfianStream: ZipfianOperationStream | undefined,
 ): Promise<void> {
     if (ownedWidgets.length === 0) {
         return;
@@ -220,7 +236,7 @@ async function runWorker(
             const operation = selectOperation(random(), profile.readRatio);
 
             if (operation === 'read') {
-                await runReadOperation(readbackClient, readCorpus, random, workload);
+                await runReadOperation(readbackClient, readCorpus, random, workload, zipfianStream);
             } else {
                 const widget = ownedWidgets[selectIndex(random(), ownedWidgets.length)]!;
                 const expectedName = `benchmark:${workerIndex}:write:${writeCounter}`;
@@ -257,17 +273,22 @@ async function runReadOperation(
     readCorpus: BenchmarkReadCorpus,
     random: () => number,
     workload: BenchmarkWorkloadName,
+    zipfianStream: ZipfianOperationStream | undefined,
 ): Promise<void> {
+    if (workload === 'zipfian') {
+        if (zipfianStream === undefined) {
+            throw new Error('Zipfian workloads require a deterministic operation stream per worker');
+        }
+        await executeReadOperation(client, zipfianStream.next());
+        return;
+    }
+
     const readKind = selectReadKind(random(), readCorpus.parts.length > 0, workload);
     const listTake = workload === 'standard' ? LIST_READ_TAKE : LIST_HEAVY_READ_TAKE;
 
     switch (readKind) {
         case 'widgetUnique': {
-            const widget = readCorpus.widgets[
-                workload === 'zipfian'
-                    ? selectZipfianRank(random, readCorpus.widgets.length)
-                    : selectIndex(random(), readCorpus.widgets.length)
-            ]!;
+            const widget = readCorpus.widgets[selectIndex(random(), readCorpus.widgets.length)]!;
             await client.widget.findUnique({
                 where: { id: widget.id },
                 cache: { ttlSeconds: CACHE_TTL_SECONDS },
@@ -303,11 +324,7 @@ async function runReadOperation(
             return;
         }
         case 'widgetAggregate': {
-            const tenantId = readCorpus.tenantIds[
-                workload === 'zipfian'
-                    ? selectZipfianRank(random, readCorpus.tenantIds.length)
-                    : selectIndex(random(), readCorpus.tenantIds.length)
-            ]!;
+            const tenantId = readCorpus.tenantIds[selectIndex(random(), readCorpus.tenantIds.length)]!;
             await client.widget.aggregate({
                 where: { tenantId },
                 _count: { _all: true },
@@ -315,6 +332,49 @@ async function runReadOperation(
             });
             return;
         }
+    }
+}
+
+async function executeReadOperation(
+    client: BenchmarkFixture['clients'][number],
+    operation: RealisticWorkloadOperation,
+): Promise<void> {
+    switch (operation.kind) {
+        case 'widgetUnique':
+            await client.widget.findUnique({
+                where: { id: operation.widgetId },
+                cache: { ttlSeconds: CACHE_TTL_SECONDS },
+            });
+            return;
+        case 'partUnique':
+            await client.part.findUnique({
+                where: { id: operation.partId },
+                cache: { ttlSeconds: CACHE_TTL_SECONDS },
+            });
+            return;
+        case 'widgetList':
+            await client.widget.findMany({
+                where: { tenantId: operation.tenantId },
+                orderBy: { id: 'asc' },
+                take: operation.take ?? LIST_HEAVY_READ_TAKE,
+                cache: { ttlSeconds: CACHE_TTL_SECONDS },
+            });
+            return;
+        case 'partList':
+            await client.part.findMany({
+                where: { tenantId: operation.tenantId },
+                orderBy: { id: 'asc' },
+                take: operation.take ?? LIST_HEAVY_READ_TAKE,
+                cache: { ttlSeconds: CACHE_TTL_SECONDS },
+            });
+            return;
+        case 'widgetAggregate':
+            await client.widget.aggregate({
+                where: { tenantId: operation.tenantId },
+                _count: { _all: true },
+                cache: { ttlSeconds: CACHE_TTL_SECONDS },
+            });
+            return;
     }
 }
 

@@ -21,7 +21,7 @@ The work addresses three verified correctness and measurement defects before opt
 - No legacy adapter compatibility layer is required.
 - Remove `hash-object`; do not add a replacement runtime dependency.
 - Performance values are informational, not CI thresholds.
-- Each stage is implemented by a fresh GPT-5.6 SOL agent at medium reasoning effort.
+- Each stage is implemented by a fresh GPT-5.6 Luna agent at maximum reasoning effort.
 
 ## Stage 1: Correctness and Trustworthy Measurement
 
@@ -208,6 +208,6 @@ Every stage runs unit tests, integration tests, typecheck, lint, build, package 
 
 ## Execution and Review
 
-Execution uses four sequential fresh GPT-5.6 SOL agents at medium reasoning effort, one per stage. Each agent receives this spec, its exact implementation-plan task, preceding stage interfaces, baseline metrics, and a report-file contract.
+Execution uses four sequential fresh GPT-5.6 Luna agents at maximum reasoning effort, one per stage. Each agent receives this spec, its exact implementation-plan task, preceding stage interfaces, baseline metrics, and a report-file contract.
 
 Each stage is independently reviewed for specification compliance and code quality. Important findings are fixed and re-reviewed before the next stage begins. A final whole-branch review evaluates cross-stage correctness, fallback parity, public API quality, documentation, and benchmark claims.

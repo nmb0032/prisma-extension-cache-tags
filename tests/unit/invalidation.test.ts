@@ -16,7 +16,7 @@ const config: NormalizedCacheConfig = {
     enabled: true,
     defaultTtlSeconds: 30,
     maxTtlSeconds: 300,
-    keyPrefix: 'prismaCacheTags:v1',
+    keyPrefix: 'prismaCacheTags:v2',
     cacheNull: true,
     cacheEmpty: true,
     schemaVersion: 1,
@@ -67,7 +67,7 @@ describe('bumpTagVersions', () => {
 
     test('invalidation cost is one increment per tag, independent of cached key count', async () => {
         for (let index = 0; index < 500; index += 1) {
-            redis.store.set(`prismaCacheTags:v1:qry:Widget:findMany:key${index}`, '"cached"');
+            redis.store.set(`prismaCacheTags:v2:qry:Widget:findMany:key${index}`, '"cached');
         }
         redis.resetCallCounts();
 

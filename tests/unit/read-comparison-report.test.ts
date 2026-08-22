@@ -18,8 +18,8 @@ describe('read-only cache comparison reporting', () => {
         const metrics = new BenchmarkMetrics();
         metrics.recordOperation('read', 10);
         metrics.recordOperation('read', 30);
-        metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findMany', result: 'hit' });
-        metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findMany', result: 'miss' });
+        metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findMany', result: 'hit', path: 'fallback' });
+        metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findMany', result: 'miss', path: 'fallback' });
         metrics.addDatabaseQueries(2);
 
         const phase = createReadComparisonPhase('warm', metrics.summarize(1_000), 'warm-digest', 4);

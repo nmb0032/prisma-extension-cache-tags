@@ -6,30 +6,25 @@ generation. No cache-key scan is needed.
 
 ## Generational cache keys
 
-For a read without `cache.key`, the generated cache key is conceptually the
-hash of:
+For every read, the generated base cache key is the SHA-256 hash of one
+canonical identity:
 
 ```text
-{ model, operation, args, schemaVersion, tags, tagVersions }
+{ model, operation, args, schemaVersion, tags, tenantScope, customKey? }
 ```
 
-The extension normalizes the tags and reads their current versions before
-hashing the query identity. `tagVersions` come from an `MGET` of
-`<prefix>:tagver:<tag>` counters on every read. With no tags, the version list
-is empty and there are no counter keys to request.
-
-When `cache.key` is supplied, the extension uses the custom-key form
-`<prefix>:custom:<hash({ key, model, operation, args, schemaVersion,
-tagVersions })>` instead. `args` are the cleaned Prisma arguments with the
-extension-only `cache` property removed. The caller-provided key participates
-in identity without replacing the query identity, so reusing a custom key for
-different models, operations, or arguments cannot make those queries share an
-entry.
+`args` are the cleaned Prisma arguments with the extension-only `cache`
+property removed. The caller-provided `customKey`, when present, participates
+in the same identity; it never replaces the model, operation, arguments, tags,
+or tenant scope. Object properties are sorted by the canonical encoder, so
+semantically equal Prisma calls share one base key regardless of insertion
+order.
 
 For a read of `Widget.findMany`, the generated Redis key is shaped like
-`<prefix>:qry:Widget:findMany:<hash>`. The hash also includes the Prisma
-arguments with the extension-only `cache` property removed, so changing a
-filter, projection, pagination, or generation produces a different key.
+`<prefix>:qry:Widget:findMany:<sha256>:<version-token>`. Current tag versions
+come from an `MGET` of `<prefix>:tagver:<tag>` counters on every fallback read.
+Missing versions are represented as zero, and the ordered values are joined
+with dots (for example, `0.2.10`). With no tags, the token is empty.
 
 ## Tag resolution and granularity
 
@@ -71,12 +66,18 @@ retained.
 
 ## Cache identity and stored values
 
-Each cached value is stored in a serialized envelope containing only the
-SuperJSON value. Stage 1 does not store or verify a second fingerprint; the
-generated or custom Redis key is the query identity. Both key forms include the
-model, operation, cleaned arguments, `schemaVersion`, and normalized tag
-generations. `schemaVersion` is therefore the explicit way to retire all
-generations after a breaking cached-shape change.
+Each v2 cached value is stored as one flat SuperJSON string containing
+`{ identity, tenantScope, value }`. The identity is the exact canonical string
+hashed for the base key, and `tenantScope` is sorted and deduplicated. Every
+fallback read deserializes this envelope and verifies both fields before
+returning `value`. A mismatch is logged without full query arguments, deleted
+when possible, measured as `result: 'bypass', path: 'fallback'`, and sent to
+Prisma instead. A deletion failure does not change that safe behavior.
+
+The default prefix is `prismaCacheTags:v2`; v1 entries are deliberately
+ignored and are neither read nor migrated. The raw `RedisAdapter` methods
+`getString` and `setString` exchange these serialized strings directly, so the
+extension does not perform an intermediate JSON conversion.
 
 ## Transactions
 

@@ -1,31 +1,56 @@
 import { describe, expect, test } from 'vitest';
-import { deserializeCacheEnvelope, deserializeCachedValue, serializeCacheEnvelope } from '../../src/serialization';
+import { deserializeCacheEnvelope, matchesCacheIdentity, serializeCacheEnvelope } from '../../src/serialization';
 
 describe('serialization', () => {
-    test('round-trips Date, BigInt, Map, and undefined', () => {
+    test('round-trips one flat envelope with identity, tenant scope, and Prisma values', () => {
         const value = {
-            when: new Date('2026-01-02T03:04:05.000Z'),
-            big: 10n ** 20n,
-            map: new Map([['a', 1]]),
-            missing: undefined,
+            date: new Date('2026-08-22T00:00:00.000Z'),
+            bigint: 42n,
+            nested: [undefined, Number.NaN, new Set(['a'])],
+        };
+        const envelope = {
+            identity: 'canonical-query-identity',
+            tenantScope: ['tenant-a'],
+            value,
         };
 
-        const serialized = serializeCacheEnvelope(value);
-        const envelope = deserializeCacheEnvelope(serialized);
-        const restored = deserializeCachedValue(envelope) as typeof value;
+        const payload = serializeCacheEnvelope(envelope);
+        const restored = deserializeCacheEnvelope(payload);
+        const restoredValue = restored.value as typeof value;
 
-        expect(Object.keys(envelope)).toEqual(['value']);
-        expect(restored.when).toBeInstanceOf(Date);
-        expect(restored.when.toISOString()).toBe('2026-01-02T03:04:05.000Z');
-        expect(restored.big).toBe(10n ** 20n);
-        expect(restored.map).toBeInstanceOf(Map);
-        expect(restored.map.get('a')).toBe(1);
-        expect('missing' in (restored as object)).toBe(true);
+        expect(typeof payload).toBe('string');
+        expect(restored).toEqual(envelope);
+        expect(restoredValue.date).toBeInstanceOf(Date);
+        expect(restoredValue.bigint).toBe(42n);
+        expect(restoredValue.nested[2]).toBeInstanceOf(Set);
+        expect(payload).not.toContain('fingerprint');
     });
 
-    test('round-trips null without a second query identity', () => {
-        const serialized = serializeCacheEnvelope(null);
-        expect(Object.keys(deserializeCacheEnvelope(serialized))).toEqual(['value']);
-        expect(deserializeCachedValue(deserializeCacheEnvelope(serialized))).toBeNull();
+    test('retains a sorted tenant scope and verifies exact identity and scope', () => {
+        const envelope = {
+            identity: 'identity',
+            tenantScope: ['tenant-a', 'tenant-b'],
+            value: null,
+        };
+        const prepared = {
+            baseKey: 'prismaCacheTags:v2:qry:Widget:findMany:hash',
+            tagVersionKeys: [],
+            identity: 'identity',
+            tenantScope: ['tenant-a', 'tenant-b'],
+        };
+
+        expect(matchesCacheIdentity(deserializeCacheEnvelope(serializeCacheEnvelope(envelope)), prepared)).toBe(true);
+        expect(
+            matchesCacheIdentity(
+                { ...envelope, identity: 'other' },
+                prepared,
+            ),
+        ).toBe(false);
+        expect(
+            matchesCacheIdentity(
+                { ...envelope, tenantScope: ['tenant-b'] },
+                prepared,
+            ),
+        ).toBe(false);
     });
 });

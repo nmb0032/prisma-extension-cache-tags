@@ -13,7 +13,7 @@ describe('observability defaults', () => {
 
     test('noopMetrics accepts a cache event and never throws', () => {
         expect(() => {
-            noopMetrics.onCacheEvent({ model: 'Widget', operation: 'findMany', result: 'hit' });
+            noopMetrics.onCacheEvent({ model: 'Widget', operation: 'findMany', result: 'hit', path: 'fallback' });
         }).not.toThrow();
     });
 

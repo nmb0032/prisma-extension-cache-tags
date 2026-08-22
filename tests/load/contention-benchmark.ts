@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import { canonicalizePrismaValue } from '../../src/canonical';
 import { deleteRedisNamespace, type BenchmarkFixture } from './benchmark-fixture';
 import { percentile } from './statistics';
 
@@ -60,8 +61,8 @@ export async function runColdKeyContention(
         });
         release();
         const samples = await Promise.all(calls);
-        const expectedResult = JSON.stringify(samples[0]!.result);
-        if (samples.some(({ result }) => JSON.stringify(result) !== expectedResult)) {
+        const expectedResult = canonicalizePrismaValue(samples[0]!.result);
+        if (samples.some(({ result }) => canonicalizePrismaValue(result) !== expectedResult)) {
             throw new Error(`Cold-key contention returned unequal results in round ${round + 1}`);
         }
 

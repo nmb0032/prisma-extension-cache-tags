@@ -78,6 +78,25 @@ A successful write increments the affected counters, so old cache keys become un
 
 Read the [detailed invalidation explanation](docs/how-invalidation-works.md) for key generation and transaction details.
 
+## v2 keys and wire format
+
+The default namespace is `prismaCacheTags:v2`. A read first prepares one
+canonical identity from its model, operation, cleaned Prisma arguments, schema
+version, normalized tags, tenant scope, and optional custom key. The SHA-256
+digest of that exact identity is used in the base query key and the identity is
+retained in the cached envelope. Current tag versions are appended as a stable
+dot-separated generation token.
+
+Values are stored as one flat SuperJSON string:
+
+```ts
+{ identity, tenantScope, value }
+```
+
+Every fallback hit deserializes and verifies both identity and sorted tenant
+scope before returning `value`. A mismatch is deleted when possible, reported
+as a cache bypass, and never returned. v1 keys are not read or migrated.
+
 ## Requirements
 
 - Prisma `^7.2.0` with a driver adapter

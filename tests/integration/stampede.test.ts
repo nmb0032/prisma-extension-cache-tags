@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, test } from 'vitest';
 import { createNodeRedisAdapter } from '../../src/adapters/node-redis';
 import { normalizeConfig } from '../../src/config';
-import { generateCacheKey } from '../../src/keys';
+import { buildVersionedCacheKey, createVersionToken, prepareCacheKey } from '../../src/keys';
 import { acquireCacheLock, releaseCacheLock } from '../../src/locks';
 import { resolveCacheTags } from '../../src/tags';
 import { createCachedClient, createQueryCounter, createRedis } from './helpers';
@@ -57,7 +57,9 @@ describe('distributed stampede protection', () => {
         const args = { where: { tenantId: 't1' } };
         const cacheOptions = { ttlSeconds: 60 };
         const tags = resolveCacheTags('Widget', 'findMany', args, cacheOptions, config, false).tags;
-        const cacheKey = await generateCacheKey('Widget', 'findMany', args, tags, config, redisAdapter);
+        const prepared = prepareCacheKey('Widget', 'findMany', args, tags, ['t1'], config);
+        const versions = await redisAdapter.mgetString(prepared.tagVersionKeys);
+        const cacheKey = buildVersionedCacheKey(prepared.baseKey, createVersionToken(versions));
         const ownerLock = await acquireCacheLock(cacheKey, { stampede: { waitMs: 10, pollMs: 1 } }, config, redisAdapter);
         expect(ownerLock).not.toBeNull();
 

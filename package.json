@@ -92,7 +92,6 @@
         "db:down": "docker compose down -v"
     },
     "dependencies": {
-        "hash-object": "^5.1.0",
         "superjson": "^2.2.6"
     },
     "peerDependencies": {

@@ -20,7 +20,7 @@ async function seedKeyspace(client: RedisClient, count: number): Promise<void> {
     for (let start = 0; start < count; start += batchSize) {
         const pipeline = client.multi();
         for (let index = start; index < Math.min(start + batchSize, count); index += 1) {
-            pipeline.set(`prismaCacheTags:v1:qry:Widget:findMany:${index}`, '"cached"');
+            pipeline.set(`prismaCacheTags:v2:qry:Widget:findMany:${index}`, '"cached"');
         }
         await pipeline.exec();
     }

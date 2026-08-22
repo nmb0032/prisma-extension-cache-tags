@@ -1,4 +1,10 @@
-import { afterAll, beforeEach, describe, expect, test } from 'vitest';
+import { afterAll, beforeEach, describe, expect, test, vi } from 'vitest';
+import { createNodeRedisAdapter } from '../../src/adapters/node-redis';
+import { normalizeConfig } from '../../src/config';
+import { readThroughCache } from '../../src/extension';
+import { buildVersionedCacheKey, createVersionToken, prepareCacheKey } from '../../src/keys';
+import { resolveCacheTags } from '../../src/tags';
+import { serializeCacheEnvelope } from '../../src/serialization';
 import { createCachedClient, createQueryCounter, createRedis } from './helpers';
 
 const redis = await createRedis();
@@ -43,6 +49,29 @@ describe('read-through caching', () => {
         expect(counter.byModel.Widget).toBe(1);
     });
 
+    test('BigInt arguments remain cacheable and result values retain their types', async () => {
+        const query = vi.fn().mockResolvedValue([{ id: 'w1', sequence: 42n }]);
+        const config = normalizeConfig();
+        const params = {
+            model: 'Widget',
+            operation: 'findMany',
+            args: { where: { sequence: 42n } },
+            cleanedArgs: { where: { sequence: 42n } },
+            query,
+            cacheOptions: {},
+            config,
+            redisAdapter: createNodeRedisAdapter(redis),
+        };
+
+        const first = await readThroughCache(params);
+        const second = await readThroughCache(params);
+
+        expect(first).toEqual([{ id: 'w1', sequence: 42n }]);
+        expect(second).toEqual(first);
+        expect(typeof (second as Array<{ sequence: bigint }>)[0]?.sequence).toBe('bigint');
+        expect(query).toHaveBeenCalledTimes(1);
+    });
+
     test('custom keys isolate model, operation, and argument identities', async () => {
         const first = await prisma.widget.create({ data: { tenantId: 't1', name: 'first' } });
         const second = await prisma.widget.create({ data: { tenantId: 't1', name: 'second' } });
@@ -82,6 +111,49 @@ describe('read-through caching', () => {
         }
 
         expect(counterA.total + counterB.total).toBe(1);
+    });
+
+    test('v1 entries are ignored by the v2 namespace', async () => {
+        await prisma.widget.create({ data: { tenantId: 't1', name: 'fresh' } });
+        await redis.set('prismaCacheTags:v1:qry:Widget:findMany:legacy', 'legacy-value');
+        counter.reset();
+
+        const result = await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+
+        expect(result).toHaveLength(1);
+        expect(result[0]?.name).toBe('fresh');
+        expect(counter.byModel.Widget).toBe(1);
+    });
+
+    test('rejects a valid foreign-tenant envelope stored under the expected v2 key', async () => {
+        await prisma.widget.create({ data: { tenantId: 'tenant-a', name: 'fresh' } });
+        counter.reset();
+
+        const config = normalizeConfig({ tenantKeys: ['tenantId'] });
+        const cacheOptions = { ttlSeconds: 60 };
+        const args = { where: { tenantId: 'tenant-a' } };
+        const resolvedTags = resolveCacheTags('Widget', 'findMany', args, cacheOptions, config, false);
+        const prepared = prepareCacheKey('Widget', 'findMany', args, resolvedTags.tags, resolvedTags.tenantIds, config);
+        const adapter = createNodeRedisAdapter(redis);
+        const versions = await adapter.mgetString(prepared.tagVersionKeys);
+        const cacheKey = buildVersionedCacheKey(prepared.baseKey, createVersionToken(versions));
+        await adapter.setString(
+            cacheKey,
+            serializeCacheEnvelope({
+                identity: 'foreign-identity',
+                tenantScope: ['tenant-b'],
+                value: [{ id: 'foreign', tenantId: 'tenant-b', name: 'must-not-leak' }],
+            }),
+            60,
+        );
+
+        const result = await prisma.widget.findMany({ ...args, cache: cacheOptions });
+
+        expect(result).toHaveLength(1);
+        expect(result[0]?.tenantId).toBe('tenant-a');
+        expect(result[0]?.name).toBe('fresh');
+        expect(counter.byModel.Widget).toBe(1);
+        expect(await adapter.getString(cacheKey)).toBeNull();
     });
 
     test('the cached result is structurally identical to the database result', async () => {

@@ -1,22 +1,75 @@
-import hash from 'hash-object';
-import { normalizeTags } from './tags';
-import type { NormalizedCacheConfig, RedisAdapter } from './types';
+import { createHash } from 'node:crypto';
+import { CanonicalizationError, canonicalizePrismaValue, hashCanonicalValue } from './canonical';
+import type { NormalizedCacheConfig, PreparedCacheKey, RedisAdapter } from './types';
 
-export function removeCacheFromArgs(args: unknown): unknown {
-    if (args && typeof args === 'object' && 'cache' in args) {
-        const { cache: _cache, ...rest } = args as { cache?: unknown } & Record<string, unknown>;
-        return rest;
-    }
-
-    return args;
-}
+export type { PreparedCacheKey } from './types';
 
 export function getTagVersionKey(tag: string, config: NormalizedCacheConfig): string {
     return `${config.keyPrefix}:tagver:${tag}`;
 }
 
 export function getCacheLockKey(cacheKey: string, config: NormalizedCacheConfig): string {
-    return `${config.keyPrefix}:lock:${hash({ cacheKey })}`;
+    return `${config.keyPrefix}:lock:${hashCanonicalValue(cacheKey)}`;
+}
+
+export function createVersionToken(values: readonly (string | null)[]): string {
+    return values.map((value) => value ?? '0').join('.');
+}
+
+export function buildVersionedCacheKey(baseKey: string, versionToken: string): string {
+    return `${baseKey}:${versionToken}`;
+}
+
+export function prepareCacheKey(
+    model: string,
+    operation: string,
+    cleanedArgs: unknown,
+    normalizedTags: string[],
+    tenantIds: string[],
+    config: NormalizedCacheConfig,
+    customKey?: string,
+): PreparedCacheKey {
+    const tenantScope = Array.from(new Set(tenantIds)).sort();
+    const tags = Array.from(new Set(normalizedTags)).sort();
+    const identityInput: {
+        model: string;
+        operation: string;
+        args: unknown;
+        schemaVersion: number;
+        tags: string[];
+        tenantScope: string[];
+        customKey?: string;
+    } = {
+        model,
+        operation,
+        args: cleanedArgs,
+        schemaVersion: config.schemaVersion,
+        tags,
+        tenantScope,
+    };
+
+    if (customKey !== undefined) {
+        identityInput.customKey = customKey;
+    }
+
+    let identity: string;
+    try {
+        identity = canonicalizePrismaValue(identityInput);
+    } catch (error) {
+        if (!(error instanceof CanonicalizationError) || !error.path.startsWith('$.args')) {
+            throw error;
+        }
+
+        throw new CanonicalizationError(`$${error.path.slice('$.args'.length)}`, error.reason);
+    }
+    const digest = createHash('sha256').update(identity).digest('hex');
+
+    return {
+        baseKey: `${config.keyPrefix}:qry:${model}:${operation}:${digest}`,
+        tagVersionKeys: tags.map((tag) => getTagVersionKey(tag, config)),
+        identity,
+        tenantScope,
+    };
 }
 
 export async function getTagVersions(
@@ -31,26 +84,6 @@ export async function getTagVersions(
     const values = await redisAdapter.mgetString(tags.map((tag) => getTagVersionKey(tag, config)));
     return tags.map((tag, index) => ({
         tag,
-        version: values[index] ? Number(values[index]) || 0 : 0,
+        version: values[index] === null || values[index] === undefined ? 0 : Number(values[index]) || 0,
     }));
-}
-
-export async function generateCacheKey(
-    model: string,
-    operation: string,
-    args: unknown,
-    tags: string[],
-    config: NormalizedCacheConfig,
-    redisAdapter: RedisAdapter,
-): Promise<string> {
-    const normalizedTags = normalizeTags(tags, config.maxTagsPerQuery);
-    const payload = {
-        model,
-        operation,
-        args: removeCacheFromArgs(args),
-        schemaVersion: config.schemaVersion,
-        tagVersions: await getTagVersions(normalizedTags, config, redisAdapter),
-    };
-
-    return `${config.keyPrefix}:qry:${model}:${operation}:${hash(payload)}`;
 }

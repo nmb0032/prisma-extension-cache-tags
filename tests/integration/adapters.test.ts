@@ -29,18 +29,19 @@ beforeEach(async () => {
 
 describe.each(cases)('%s adapter', (_name, adapter) => {
     test('set and get round-trip a structured value', async () => {
-        await adapter.set('k1', { a: 1, b: ['x'] }, 60);
-        expect(await adapter.get('k1')).toEqual({ a: 1, b: ['x'] });
+        const payload = '{"a":1,"b":["x"]}';
+        await adapter.setString('k1', payload, 60);
+        expect(await adapter.getString('k1')).toBe(payload);
     });
 
     test('get returns null for a missing key', async () => {
-        expect(await adapter.get('nope')).toBeNull();
+        expect(await adapter.getString('nope')).toBeNull();
     });
 
     test('delete removes a key', async () => {
-        await adapter.set('k1', { a: 1 }, 60);
+        await adapter.setString('k1', '{"a":1}', 60);
         await adapter.delete('k1');
-        expect(await adapter.get('k1')).toBeNull();
+        expect(await adapter.getString('k1')).toBeNull();
     });
 
     test('increment starts at the amount and accumulates', async () => {
@@ -71,7 +72,7 @@ describe.each(cases)('%s adapter', (_name, adapter) => {
     });
 
     test('expire sets a ttl that redis reports', async () => {
-        await adapter.set('k1', { a: 1 });
+        await adapter.setString('k1', '{"a":1}');
         await adapter.expire('k1', 100);
         expect(await nodeRedisClient.ttl('k1')).toBeGreaterThan(0);
     });

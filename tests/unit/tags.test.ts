@@ -8,7 +8,7 @@ function makeConfig(overrides: Partial<NormalizedCacheConfig> = {}): NormalizedC
         enabled: true,
         defaultTtlSeconds: 30,
         maxTtlSeconds: 300,
-        keyPrefix: 'prismaCacheTags:v1',
+        keyPrefix: 'prismaCacheTags:v2',
         cacheNull: true,
         cacheEmpty: true,
         schemaVersion: 1,

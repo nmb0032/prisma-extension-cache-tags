@@ -37,10 +37,22 @@ function addFilterValue(value: unknown, results: Set<string>): void {
     }
 }
 
-function collectStringValues(value: unknown, keys: Set<string>, results = new Set<string>()): Set<string> {
+function collectStringValues(
+    value: unknown,
+    keys: Set<string>,
+    results = new Set<string>(),
+    visited = new WeakSet<object>(),
+): Set<string> {
+    if (value && typeof value === 'object') {
+        if (visited.has(value)) {
+            return results;
+        }
+        visited.add(value);
+    }
+
     if (Array.isArray(value)) {
         for (const item of value) {
-            collectStringValues(item, keys, results);
+            collectStringValues(item, keys, results, visited);
         }
         return results;
     }
@@ -58,7 +70,7 @@ function collectStringValues(value: unknown, keys: Set<string>, results = new Se
             addFilterValue(child, results);
         }
 
-        collectStringValues(child, keys, results);
+        collectStringValues(child, keys, results, visited);
     }
 
     return results;

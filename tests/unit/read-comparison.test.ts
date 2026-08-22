@@ -138,21 +138,21 @@ function createFakeComparisonFixture(options: FakeComparisonFixtureOptions = {})
 
             if (mode === 'warmup' || mode === 'rawA' || mode === 'rawB') {
                 if (shouldInvalidate) {
-                    metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findUnique', result: 'miss' });
+                    metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findUnique', result: 'miss', path: 'fallback' });
                 }
                 queryCounter.total += 1;
             } else if (mode === 'cold') {
                 if (shouldInvalidate) {
-                    metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findUnique', result: 'hit' });
+                    metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findUnique', result: 'hit', path: 'fallback' });
                 } else {
-                    metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findUnique', result: 'miss' });
+                    metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findUnique', result: 'miss', path: 'fallback' });
                     queryCounter.total += 1;
                 }
             } else if (shouldInvalidate) {
-                metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findUnique', result: 'miss' });
+                metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findUnique', result: 'miss', path: 'fallback' });
                 queryCounter.total += 1;
             } else {
-                metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findUnique', result: 'hit' });
+                metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findUnique', result: 'hit', path: 'fallback' });
             }
 
             switch (operation.kind) {

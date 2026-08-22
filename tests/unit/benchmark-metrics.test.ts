@@ -8,9 +8,9 @@ describe('benchmark metrics', () => {
         metrics.recordOperation('read', 10);
         metrics.recordOperation('read', 20);
         metrics.recordOperation('write', 30);
-        metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findMany', result: 'hit' });
-        metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findMany', result: 'miss' });
-        metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findMany', result: 'miss' });
+        metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findMany', result: 'hit', path: 'fallback' });
+        metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findMany', result: 'miss', path: 'fallback' });
+        metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'findMany', result: 'miss', path: 'fallback' });
         metrics.addDatabaseQueries(4);
         metrics.recordError();
         metrics.recordFreshnessFailure();
@@ -51,7 +51,7 @@ describe('benchmark metrics', () => {
         const cacheMetrics = metrics.cacheMetrics;
 
         metrics.recordOperation('write', 25);
-        metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'update', result: 'hit' });
+        metrics.cacheMetrics.onCacheEvent({ model: 'Widget', operation: 'update', result: 'hit', path: 'fallback' });
         metrics.addDatabaseQueries(2);
         metrics.recordError();
         metrics.recordFreshnessFailure();

@@ -1,10 +1,17 @@
 import type { Prisma } from '@prisma/client/extension';
 import type { Operation } from '@prisma/client/runtime/client';
-import type superjson from 'superjson';
 
-/** Cached value envelope. */
-export interface CachedEnvelope {
-    value: ReturnType<typeof superjson.serialize>;
+export interface PreparedCacheKey {
+    baseKey: string;
+    tagVersionKeys: string[];
+    identity: string;
+    tenantScope: string[];
+}
+
+export interface CachedEnvelopeV2 {
+    identity: string;
+    tenantScope: string[];
+    value: unknown;
 }
 
 /**
@@ -21,16 +28,14 @@ export interface CachedEnvelope {
  * await client.connect();
  *
  * const adapter: RedisAdapter = {
- *   get: async <T>(key: string) => {
- *     const value = await client.get(key);
- *     return value ? JSON.parse(value) as T : null;
+ *   getString: async (key: string) => {
+ *     return client.get(key);
  *   },
- *   set: async (key: string, value: unknown, ttlSeconds?: number) => {
- *     const serialized = JSON.stringify(value);
+ *   setString: async (key: string, value: string, ttlSeconds?: number) => {
  *     if (ttlSeconds) {
- *       await client.setEx(key, ttlSeconds, serialized);
+ *       await client.setEx(key, ttlSeconds, value);
  *     } else {
- *       await client.set(key, serialized);
+ *       await client.set(key, value);
  *     }
  *   },
  *   delete: async (key: string) => {
@@ -49,10 +54,10 @@ export interface CachedEnvelope {
  * ```
  */
 export interface RedisAdapter {
-    /** Get a value from Redis, deserialized as type T */
-    get<T>(key: string): Promise<T | null>;
-    /** Set a value in Redis with optional TTL */
-    set(key: string, value: unknown, ttlSeconds?: number): Promise<void>;
+    /** Get a raw string value from Redis. */
+    getString(key: string): Promise<string | null>;
+    /** Set an already-serialized raw string in Redis with optional TTL. */
+    setString(key: string, value: string, ttlSeconds?: number): Promise<void>;
     /** Delete a key from Redis */
     delete(key: string): Promise<void>;
     /** Increment a numeric value in Redis */
@@ -159,7 +164,9 @@ export interface Logger {
 export interface CacheEvent {
     model: string;
     operation: string;
-    result: 'hit' | 'miss';
+    result: 'hit' | 'miss' | 'bypass';
+    path: 'fallback' | 'bypass';
+    reason?: string;
 }
 
 export interface Metrics {
@@ -188,7 +195,7 @@ export interface Metrics {
  *   createCacheTagsExtension(redisAdapter, {
  *     defaultTtlSeconds: 60,
  *     maxTtlSeconds: 600,
- *     keyPrefix: 'myapp:cache:v1',
+ *     keyPrefix: 'myapp:cache:v2',
  *     tenantKeys: ['tenantId'],
  *   }),
  * );
@@ -212,7 +219,7 @@ export interface CacheTagsConfig {
     defaultTtlSeconds?: number;
     /** Maximum allowed TTL in seconds (default: 300) */
     maxTtlSeconds?: number;
-    /** Key prefix for all cache keys (default: 'prismaCacheTags:v1') */
+    /** Key prefix for all cache keys (default: 'prismaCacheTags:v2') */
     keyPrefix?: string;
     /** Cache null results (default: true) */
     cacheNull?: boolean;

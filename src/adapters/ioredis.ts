@@ -22,17 +22,15 @@ end`;
 
 export function createIoRedisAdapter(client: IoRedisClientLike): RedisAdapter {
     return {
-        async get<T>(key: string): Promise<T | null> {
-            const raw = await client.get(key);
-            return raw === null ? null : (JSON.parse(raw) as T);
+        async getString(key: string): Promise<string | null> {
+            return client.get(key);
         },
-        async set(key: string, value: unknown, ttlSeconds?: number): Promise<void> {
-            const payload = JSON.stringify(value);
+        async setString(key: string, value: string, ttlSeconds?: number): Promise<void> {
             if (ttlSeconds) {
-                await client.set(key, payload, 'EX', ttlSeconds);
+                await client.set(key, value, 'EX', ttlSeconds);
                 return;
             }
-            await client.set(key, payload);
+            await client.set(key, value);
         },
         async delete(key: string): Promise<void> {
             await client.del(key);

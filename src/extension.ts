@@ -7,12 +7,12 @@
  * key scans.
  */
 import { Prisma } from '@prisma/client/extension';
-import hash from 'hash-object';
+import { CanonicalizationError } from './canonical';
 import { normalizeConfig } from './config';
 import { bumpTagVersions, publishInvalidation, runWithInvalidationContext } from './invalidation';
-import { generateCacheKey, getTagVersions } from './keys';
+import { buildVersionedCacheKey, createVersionToken, prepareCacheKey } from './keys';
 import { acquireCacheLock, releaseCacheLock, waitForCachedValue } from './locks';
-import { deserializeCachedValue, deserializeCacheEnvelope, serializeCacheEnvelope } from './serialization';
+import { deserializeCacheEnvelope, matchesCacheIdentity, serializeCacheEnvelope } from './serialization';
 import { resolveCacheTags } from './tags';
 import {
     READ_OPERATIONS,
@@ -22,12 +22,24 @@ import {
     type CacheWriteOptions,
     type ExtendedModel,
     type NormalizedCacheConfig,
+    type PreparedCacheKey,
     type ReadOperation,
     type RedisAdapter,
     type WriteOperation,
 } from './types';
 
 export { normalizeConfig };
+
+export interface PreparedRead {
+    cleanedArgs: unknown;
+    normalizedTags: string[];
+    tenantScope: string[];
+    preparedKey: PreparedCacheKey;
+}
+
+interface CachedHit {
+    value: unknown;
+}
 
 function stripCacheFromArgs<TOptions>(args: unknown): { cleanedArgs: unknown; cacheOptions: TOptions | undefined } {
     if (args && typeof args === 'object' && 'cache' in args) {
@@ -56,36 +68,86 @@ function normalizeTtl(options: CacheReadOptions, config: NormalizedCacheConfig):
     return Math.max(1, Math.min(requestedTtl, config.maxTtlSeconds));
 }
 
-async function generateCustomCacheKey(
-    key: string,
+function prepareRead(
     model: string,
     operation: string,
     cleanedArgs: unknown,
-    tags: string[],
+    args: unknown,
+    cacheOptions: CacheReadOptions,
     config: NormalizedCacheConfig,
-    redisAdapter: RedisAdapter,
-): Promise<string> {
-    return `${config.keyPrefix}:custom:${hash({
-        key,
+): PreparedRead {
+    const resolvedTags = resolveCacheTags(model, operation, args, cacheOptions, config, false);
+    const preparedKey = prepareCacheKey(
         model,
         operation,
-        args: cleanedArgs,
-        schemaVersion: config.schemaVersion,
-        tagVersions: await getTagVersions(tags, config, redisAdapter),
-    })}`;
+        cleanedArgs,
+        resolvedTags.tags,
+        resolvedTags.tenantIds,
+        config,
+        cacheOptions.key,
+    );
+
+    return {
+        cleanedArgs,
+        normalizedTags: resolvedTags.tags,
+        tenantScope: preparedKey.tenantScope,
+        preparedKey,
+    };
 }
 
 async function tryGetCachedValue(
+    model: string,
+    operation: string,
     cacheKey: string,
+    prepared: PreparedRead,
     redisAdapter: RedisAdapter,
-): Promise<unknown | undefined> {
-    const cachedSuperJson = await redisAdapter.get<ReturnType<typeof serializeCacheEnvelope>>(cacheKey);
-    if (!cachedSuperJson) {
+    config: NormalizedCacheConfig,
+    onIdentityMismatch: () => void,
+): Promise<CachedHit | undefined> {
+    const payload = await redisAdapter.getString(cacheKey);
+    if (payload === null) {
         return undefined;
     }
 
-    const cached = deserializeCacheEnvelope(cachedSuperJson);
-    return deserializeCachedValue(cached);
+    const cached = deserializeCacheEnvelope(payload);
+    if (!matchesCacheIdentity(cached, prepared.preparedKey)) {
+        onIdentityMismatch();
+        const observedTenantScope =
+            cached && typeof cached === 'object' && Array.isArray(cached.tenantScope) ? cached.tenantScope : [];
+        config.logger.warn(
+            {
+                model,
+                operation,
+                cacheKey,
+                expectedTenantScope: prepared.tenantScope,
+                observedTenantScope,
+            },
+            'Cache identity mismatch; bypassing cached value',
+        );
+        try {
+            await redisAdapter.delete(cacheKey);
+        } catch (error) {
+            config.logger.error(
+                {
+                    model,
+                    operation,
+                    cacheKey,
+                    error: error instanceof Error ? error.message : String(error),
+                },
+                'Cache identity mismatch deletion failed',
+            );
+        }
+        config.metrics.onCacheEvent({
+            model,
+            operation,
+            result: 'bypass',
+            path: 'fallback',
+            reason: 'identity-mismatch',
+        });
+        return undefined;
+    }
+
+    return { value: cached.value };
 }
 
 export async function readThroughCache(params: {
@@ -93,6 +155,7 @@ export async function readThroughCache(params: {
     operation: string;
     args: unknown;
     cleanedArgs: unknown;
+    preparedRead?: PreparedRead;
     query: (args: unknown) => Promise<unknown>;
     cacheOptions: CacheReadOptions;
     config: NormalizedCacheConfig;
@@ -100,44 +163,49 @@ export async function readThroughCache(params: {
 }): Promise<unknown> {
     const { model, operation, args, cleanedArgs, query, cacheOptions, config, redisAdapter } = params;
     const ttlSeconds = normalizeTtl(cacheOptions, config);
-    const resolvedTags = resolveCacheTags(model, operation, args, cacheOptions, config, false);
+    const preparedRead = params.preparedRead ?? prepareRead(model, operation, cleanedArgs, args, cacheOptions, config);
     let cacheKey: string;
+    let identityMismatch = false;
 
     try {
-        cacheKey = cacheOptions.key
-            ? await generateCustomCacheKey(cacheOptions.key, model, operation, cleanedArgs, resolvedTags.tags, config, redisAdapter)
-            : await generateCacheKey(model, operation, args, resolvedTags.tags, config, redisAdapter);
+        const versions = await redisAdapter.mgetString(preparedRead.preparedKey.tagVersionKeys);
+        cacheKey = buildVersionedCacheKey(preparedRead.preparedKey.baseKey, createVersionToken(versions));
     } catch (error) {
         config.logger.warn(
-            { model, operation, error: (error as Error).message },
+            { model, operation, error: error instanceof Error ? error.message : String(error) },
             'Cache read failed; falling back to Prisma query',
         );
-        config.metrics.onCacheEvent({ model, operation, result: 'miss' });
+        config.metrics.onCacheEvent({ model, operation, result: 'miss', path: 'fallback' });
         return query(cleanedArgs);
     }
 
-    const getCachedValue = () => tryGetCachedValue(cacheKey, redisAdapter);
+    const getCachedValue = () =>
+        tryGetCachedValue(model, operation, cacheKey, preparedRead, redisAdapter, config, () => {
+            identityMismatch = true;
+        });
 
     try {
         const cachedValue = await getCachedValue();
         if (cachedValue !== undefined) {
             if (cacheOptions.debug) {
-                config.logger.debug({ model, operation, cacheKey, tags: resolvedTags.tags }, 'Cache hit');
+                config.logger.debug({ model, operation, cacheKey, tags: preparedRead.normalizedTags }, 'Cache hit');
             }
-            config.metrics.onCacheEvent({ model, operation, result: 'hit' });
-            return cachedValue;
+            config.metrics.onCacheEvent({ model, operation, result: 'hit', path: 'fallback' });
+            return cachedValue.value;
         }
     } catch (error) {
         config.logger.warn(
-            { model, operation, cacheKey, error: (error as Error).message },
+            { model, operation, cacheKey, error: error instanceof Error ? error.message : String(error) },
             'Cache read failed; falling back to Prisma query',
         );
     }
 
-    if (cacheOptions.debug) {
-        config.logger.debug({ model, operation, cacheKey, tags: resolvedTags.tags }, 'Cache miss');
+    if (!identityMismatch) {
+        if (cacheOptions.debug) {
+            config.logger.debug({ model, operation, cacheKey, tags: preparedRead.normalizedTags }, 'Cache miss');
+        }
+        config.metrics.onCacheEvent({ model, operation, result: 'miss', path: 'fallback' });
     }
-    config.metrics.onCacheEvent({ model, operation, result: 'miss' });
 
     let lock = null;
     let shouldPopulateCache = !redisAdapter.setIfNotExists;
@@ -148,20 +216,20 @@ export async function readThroughCache(params: {
                 if (!lock) {
                     const waitedValue = await waitForCachedValue(cacheKey, cacheOptions, config, redisAdapter, getCachedValue);
                     if (waitedValue !== undefined) {
-                        config.metrics.onCacheEvent({ model, operation, result: 'hit' });
-                        return waitedValue;
+                        config.metrics.onCacheEvent({ model, operation, result: 'hit', path: 'fallback' });
+                        return waitedValue.value;
                     }
                 } else {
                     shouldPopulateCache = true;
                     const cachedAfterLock = await getCachedValue();
                     if (cachedAfterLock !== undefined) {
-                        config.metrics.onCacheEvent({ model, operation, result: 'hit' });
-                        return cachedAfterLock;
+                        config.metrics.onCacheEvent({ model, operation, result: 'hit', path: 'fallback' });
+                        return cachedAfterLock.value;
                     }
                 }
             } catch (error) {
                 config.logger.warn(
-                    { model, operation, cacheKey, error: (error as Error).message },
+                    { model, operation, cacheKey, error: error instanceof Error ? error.message : String(error) },
                     'Cache lock handling failed; falling back to Prisma query',
                 );
             }
@@ -169,19 +237,26 @@ export async function readThroughCache(params: {
 
         const result = await query(cleanedArgs);
 
-        if (shouldPopulateCache && shouldCacheResult(result, config)) {
+        if (shouldPopulateCache && !identityMismatch && shouldCacheResult(result, config)) {
             try {
-                await redisAdapter.set(
+                await redisAdapter.setString(
                     cacheKey,
-                    serializeCacheEnvelope(result),
+                    serializeCacheEnvelope({
+                        identity: preparedRead.preparedKey.identity,
+                        tenantScope: preparedRead.tenantScope,
+                        value: result,
+                    }),
                     ttlSeconds,
                 );
                 if (cacheOptions.debug) {
-                    config.logger.debug({ model, operation, cacheKey, ttlSeconds, tags: resolvedTags.tags }, 'Cached query result');
+                    config.logger.debug(
+                        { model, operation, cacheKey, ttlSeconds, tags: preparedRead.normalizedTags },
+                        'Cached query result',
+                    );
                 }
             } catch (error) {
                 config.logger.warn(
-                    { model, operation, cacheKey, error: (error as Error).message },
+                    { model, operation, cacheKey, error: error instanceof Error ? error.message : String(error) },
                     'Cache write failed; continuing without cache',
                 );
             }
@@ -275,16 +350,37 @@ export function createCacheTagsExtension(redisAdapter: RedisAdapter, config?: Ca
                             return (query as (args: unknown) => Promise<unknown>)(cleanedArgs);
                         }
 
-                        return readThroughCache({
-                            model,
-                            operation,
-                            args,
-                            cleanedArgs,
-                            query: query as (args: unknown) => Promise<unknown>,
-                            cacheOptions,
-                            config: finalConfig,
-                            redisAdapter,
-                        });
+                        try {
+                            const preparedRead = prepareRead(model, operation, cleanedArgs, args, cacheOptions, finalConfig);
+                            return readThroughCache({
+                                model,
+                                operation,
+                                args,
+                                cleanedArgs,
+                                preparedRead,
+                                query: query as (args: unknown) => Promise<unknown>,
+                                cacheOptions,
+                                config: finalConfig,
+                                redisAdapter,
+                            });
+                        } catch (error) {
+                            if (!(error instanceof CanonicalizationError)) {
+                                throw error;
+                            }
+
+                            finalConfig.logger.error(
+                                { model, operation, path: error.path, reason: error.reason },
+                                'Cache canonicalization failed; bypassing cache',
+                            );
+                            finalConfig.metrics.onCacheEvent({
+                                model,
+                                operation,
+                                result: 'bypass',
+                                path: 'bypass',
+                                reason: 'canonicalization',
+                            });
+                            return (query as (args: unknown) => Promise<unknown>)(cleanedArgs);
+                        }
                     }
 
                     return query(args);

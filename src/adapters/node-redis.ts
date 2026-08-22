@@ -20,13 +20,11 @@ end`;
 
 export function createNodeRedisAdapter(client: NodeRedisClientLike): RedisAdapter {
     return {
-        async get<T>(key: string): Promise<T | null> {
-            const raw = await client.get(key);
-            return raw === null ? null : (JSON.parse(raw) as T);
+        async getString(key: string): Promise<string | null> {
+            return client.get(key);
         },
-        async set(key: string, value: unknown, ttlSeconds?: number): Promise<void> {
-            const payload = JSON.stringify(value);
-            await (ttlSeconds ? client.set(key, payload, { EX: ttlSeconds }) : client.set(key, payload));
+        async setString(key: string, value: string, ttlSeconds?: number): Promise<void> {
+            await (ttlSeconds ? client.set(key, value, { EX: ttlSeconds }) : client.set(key, value));
         },
         async delete(key: string): Promise<void> {
             await client.del(key);

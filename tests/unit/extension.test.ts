@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { buildVersionedCacheKey, getTagVersionKey, prepareCacheKey } from '../../src/keys';
 import { createCacheTagsExtension, handleWrite, normalizeConfig, readThroughCache } from '../../src/extension';
-import { getTagVersionKey } from '../../src/keys';
 import { acquireCacheLock, releaseCacheLock } from '../../src/locks';
+import { serializeCacheEnvelope } from '../../src/serialization';
 import { createFakeRedis, type FakeRedis } from './fake-redis';
 
 let redis: FakeRedis;
@@ -17,7 +18,7 @@ describe('normalizeConfig', () => {
         expect(config.dependencyTags).toEqual({});
         expect(config.tenantKeys).toEqual([]);
         expect(config.entityKeys).toEqual(['id']);
-        expect(config.keyPrefix).toBe('prismaCacheTags:v1');
+        expect(config.keyPrefix).toBe('prismaCacheTags:v2');
         expect(config.enabled).toBe(true);
         expect(config.tenantPrecision).toBe(false);
     });
@@ -54,6 +55,71 @@ describe('createCacheTagsExtension', () => {
         expect(result).toEqual([{ id: 'w1' }]);
         expect(query).toHaveBeenCalledWith({ where: { id: 'w1' } });
     });
+
+    test('bypasses only canonicalization errors and reports the exact argument path', async () => {
+        let operationHandler!: (params: Record<string, unknown>) => Promise<unknown>;
+        const error = vi.fn();
+        const onCacheEvent = vi.fn();
+        const config = normalizeConfig({
+            logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error },
+            metrics: { onCacheEvent },
+        });
+        const base = {
+            $extends: vi.fn((definition: { query: { $allOperations: typeof operationHandler } }) => {
+                operationHandler = definition.query.$allOperations;
+                return { $transaction: vi.fn() };
+            }),
+        };
+        const query = vi.fn().mockResolvedValue([{ id: 'fresh' }]);
+        const args = { where: { value: () => 'unsupported' }, cache: { ttlSeconds: 60 } };
+
+        createCacheTagsExtension(redis, config)(base as never);
+        const result = await operationHandler({ model: 'Widget', operation: 'findMany', args, query });
+
+        expect(result).toEqual([{ id: 'fresh' }]);
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(redis.callCounts.getString ?? 0).toBe(0);
+        expect(redis.callCounts.setString ?? 0).toBe(0);
+        expect(onCacheEvent).toHaveBeenCalledWith({
+            model: 'Widget',
+            operation: 'findMany',
+            result: 'bypass',
+            path: 'bypass',
+            reason: 'canonicalization',
+        });
+        expect(error).toHaveBeenCalledWith(
+            expect.objectContaining({ model: 'Widget', operation: 'findMany', path: '$.where.value' }),
+            expect.stringContaining('canonicalization'),
+        );
+    });
+
+    test('bypasses cyclic arguments without traversing them during tag resolution', async () => {
+        let operationHandler!: (params: Record<string, unknown>) => Promise<unknown>;
+        const onCacheEvent = vi.fn();
+        const base = {
+            $extends: vi.fn((definition: { query: { $allOperations: typeof operationHandler } }) => {
+                operationHandler = definition.query.$allOperations;
+                return { $transaction: vi.fn() };
+            }),
+        };
+        const args: Record<string, unknown> = {};
+        args.self = args;
+        const query = vi.fn().mockResolvedValue([{ id: 'fresh' }]);
+        const config = normalizeConfig({ metrics: { onCacheEvent } });
+
+        createCacheTagsExtension(redis, config)(base as never);
+        const result = await operationHandler({ model: 'Widget', operation: 'findMany', args: { ...args, cache: {} }, query });
+
+        expect(result).toEqual([{ id: 'fresh' }]);
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(onCacheEvent).toHaveBeenCalledWith({
+            model: 'Widget',
+            operation: 'findMany',
+            result: 'bypass',
+            path: 'bypass',
+            reason: 'canonicalization',
+        });
+    });
 });
 
 describe('readThroughCache', () => {
@@ -74,7 +140,27 @@ describe('readThroughCache', () => {
 
         expect(result).toEqual([{ id: 'w1' }]);
         expect(query).toHaveBeenCalledTimes(1);
-        expect(redis.callCounts.set).toBe(1);
+        expect(redis.callCounts.setString).toBe(1);
+    });
+
+    test('caches BigInt filter arguments instead of bypassing', async () => {
+        const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);
+        const params = {
+            model: 'Widget',
+            operation: 'findMany',
+            args: { where: { sequence: 42n } },
+            cleanedArgs: { where: { sequence: 42n } },
+            query,
+            cacheOptions: {},
+            config: normalizeConfig(),
+            redisAdapter: redis,
+        };
+
+        await readThroughCache(params);
+        await readThroughCache(params);
+
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(redis.callCounts.setString).toBe(1);
     });
 
     test('serves the second identical read from cache without calling the query', async () => {
@@ -116,7 +202,7 @@ describe('readThroughCache', () => {
         await readThroughCache(params);
         onCacheEvent.mockClear();
         redis.resetCallCounts();
-        vi.spyOn(redis, 'get').mockImplementationOnce(async () => null);
+        vi.spyOn(redis, 'getString').mockImplementationOnce(async () => null);
 
         const result = await readThroughCache(params);
 
@@ -124,8 +210,8 @@ describe('readThroughCache', () => {
         expect(query).toHaveBeenCalledTimes(1);
         expect(redis.callCounts.deleteIfValue).toBe(1);
         expect(Array.from(redis.store.keys()).filter((key) => key.includes(':lock:'))).toHaveLength(0);
-        expect(onCacheEvent).toHaveBeenNthCalledWith(1, { model: 'Widget', operation: 'findMany', result: 'miss' });
-        expect(onCacheEvent).toHaveBeenNthCalledWith(2, { model: 'Widget', operation: 'findMany', result: 'hit' });
+        expect(onCacheEvent).toHaveBeenNthCalledWith(1, { model: 'Widget', operation: 'findMany', result: 'miss', path: 'fallback' });
+        expect(onCacheEvent).toHaveBeenNthCalledWith(2, { model: 'Widget', operation: 'findMany', result: 'hit', path: 'fallback' });
     });
 
     test('reports a hit when a waiter receives the cached value', async () => {
@@ -148,20 +234,20 @@ describe('readThroughCache', () => {
         redis.resetCallCounts();
         const cacheKey = Array.from(redis.store.keys()).find((key) => key.includes(':qry:'));
         const ownerLock = await acquireCacheLock(cacheKey!, params.cacheOptions, config, redis);
-        vi.spyOn(redis, 'get').mockImplementationOnce(async () => null);
+        vi.spyOn(redis, 'getString').mockImplementationOnce(async () => null);
 
         const result = await readThroughCache(params);
         await releaseCacheLock(ownerLock!, redis, config);
 
         expect(result).toEqual([{ id: 'w1' }]);
         expect(query).toHaveBeenCalledTimes(1);
-        expect(onCacheEvent).toHaveBeenNthCalledWith(1, { model: 'Widget', operation: 'findMany', result: 'miss' });
-        expect(onCacheEvent).toHaveBeenNthCalledWith(2, { model: 'Widget', operation: 'findMany', result: 'hit' });
+        expect(onCacheEvent).toHaveBeenNthCalledWith(1, { model: 'Widget', operation: 'findMany', result: 'miss', path: 'fallback' });
+        expect(onCacheEvent).toHaveBeenNthCalledWith(2, { model: 'Widget', operation: 'findMany', result: 'hit', path: 'fallback' });
     });
 
     test('clamps the TTL to maxTtlSeconds', async () => {
         const config = normalizeConfig({ maxTtlSeconds: 10 });
-        const set = vi.spyOn(redis, 'set');
+        const set = vi.spyOn(redis, 'setString');
 
         await readThroughCache({
             model: 'Widget',
@@ -179,7 +265,7 @@ describe('readThroughCache', () => {
 
     test('falls back to the query when the cache read throws', async () => {
         const config = normalizeConfig();
-        vi.spyOn(redis, 'get').mockRejectedValueOnce(new Error('redis down'));
+        vi.spyOn(redis, 'getString').mockRejectedValueOnce(new Error('redis down'));
         const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);
 
         const result = await readThroughCache({
@@ -230,7 +316,7 @@ describe('readThroughCache', () => {
             expect.objectContaining({ error: 'redis down' }),
             'Cache read failed; falling back to Prisma query',
         );
-        expect(onCacheEvent).toHaveBeenCalledWith({ model: 'Widget', operation: 'findMany', result: 'miss' });
+        expect(onCacheEvent).toHaveBeenCalledWith({ model: 'Widget', operation: 'findMany', result: 'miss', path: 'fallback' });
     });
 
     test('falls back when a custom-key tag version lookup throws', async () => {
@@ -253,7 +339,7 @@ describe('readThroughCache', () => {
 
         expect(result).toEqual([{ id: 'w1' }]);
         expect(query).toHaveBeenCalledWith(cleanedArgs);
-        expect(onCacheEvent).toHaveBeenCalledWith({ model: 'Widget', operation: 'findMany', result: 'miss' });
+        expect(onCacheEvent).toHaveBeenCalledWith({ model: 'Widget', operation: 'findMany', result: 'miss', path: 'fallback' });
     });
 
     test('does not cache empty results when cacheEmpty is false', async () => {
@@ -270,7 +356,7 @@ describe('readThroughCache', () => {
             redisAdapter: redis,
         });
 
-        expect(redis.callCounts.set ?? 0).toBe(0);
+        expect(redis.callCounts.setString ?? 0).toBe(0);
     });
 
     test('reports hit and miss to the metrics sink', async () => {
@@ -290,9 +376,157 @@ describe('readThroughCache', () => {
         await readThroughCache(params);
         await readThroughCache(params);
 
-        expect(onCacheEvent).toHaveBeenCalledWith({ model: 'Widget', operation: 'findMany', result: 'miss' });
-        expect(onCacheEvent).toHaveBeenCalledWith({ model: 'Widget', operation: 'findMany', result: 'hit' });
+        expect(onCacheEvent).toHaveBeenCalledWith({ model: 'Widget', operation: 'findMany', result: 'miss', path: 'fallback' });
+        expect(onCacheEvent).toHaveBeenCalledWith({ model: 'Widget', operation: 'findMany', result: 'hit', path: 'fallback' });
         expect(onCacheEvent).toHaveBeenCalledTimes(2);
+    });
+
+    test('rejects a foreign identity and tenant scope instead of returning its value', async () => {
+        const onCacheEvent = vi.fn();
+        const warn = vi.fn();
+        const config = normalizeConfig({
+            tenantKeys: ['tenantId'],
+            logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
+            metrics: { onCacheEvent },
+        });
+        const cleanedArgs = { where: { tenantId: 'tenant-a' } };
+        const preparedKey = prepareCacheKey('Widget', 'findMany', cleanedArgs, ['tenant:tenant-a'], ['tenant-a'], config);
+        const cacheKey = buildVersionedCacheKey(preparedKey.baseKey, '0');
+        await redis.setString(
+            cacheKey,
+            serializeCacheEnvelope({
+                identity: 'foreign-identity',
+                tenantScope: ['tenant-b'],
+                value: [{ id: 'foreign' }],
+            }),
+        );
+        const query = vi.fn().mockResolvedValue([{ id: 'fresh' }]);
+
+        const result = await readThroughCache({
+            model: 'Widget',
+            operation: 'findMany',
+            args: cleanedArgs,
+            cleanedArgs,
+            preparedRead: {
+                cleanedArgs,
+                normalizedTags: ['tenant:tenant-a'],
+                tenantScope: ['tenant-a'],
+                preparedKey,
+            },
+            query,
+            cacheOptions: {},
+            config,
+            redisAdapter: redis,
+        });
+
+        expect(result).toEqual([{ id: 'fresh' }]);
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(redis.callCounts.delete).toBe(1);
+        expect(redis.store.has(cacheKey)).toBe(false);
+        expect(onCacheEvent).toHaveBeenCalledWith({
+            model: 'Widget',
+            operation: 'findMany',
+            result: 'bypass',
+            path: 'fallback',
+            reason: 'identity-mismatch',
+        });
+        expect(warn).toHaveBeenCalledWith(
+            expect.objectContaining({
+                model: 'Widget',
+                operation: 'findMany',
+                cacheKey,
+                expectedTenantScope: ['tenant-a'],
+                observedTenantScope: ['tenant-b'],
+            }),
+            expect.stringContaining('identity mismatch'),
+        );
+    });
+
+    test('queries Prisma when deleting a mismatched entry fails and logs the failure', async () => {
+        const error = vi.fn();
+        const config = normalizeConfig({
+            logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error },
+        });
+        const cleanedArgs = { where: { tenantId: 'tenant-a' } };
+        const preparedKey = prepareCacheKey('Widget', 'findMany', cleanedArgs, ['tenant:tenant-a'], ['tenant-a'], config);
+        const cacheKey = buildVersionedCacheKey(preparedKey.baseKey, '0');
+        await redis.setString(
+            cacheKey,
+            serializeCacheEnvelope({
+                identity: 'foreign-identity',
+                tenantScope: ['tenant-b'],
+                value: [{ id: 'foreign' }],
+            }),
+        );
+        vi.spyOn(redis, 'delete').mockRejectedValueOnce(new Error('redis down'));
+        const query = vi.fn().mockResolvedValue([{ id: 'fresh' }]);
+
+        await expect(
+            readThroughCache({
+                model: 'Widget',
+                operation: 'findMany',
+                args: cleanedArgs,
+                cleanedArgs,
+                preparedRead: {
+                    cleanedArgs,
+                    normalizedTags: ['tenant:tenant-a'],
+                    tenantScope: ['tenant-a'],
+                    preparedKey,
+                },
+                query,
+                cacheOptions: {},
+                config,
+                redisAdapter: redis,
+            }),
+        ).resolves.toEqual([{ id: 'fresh' }]);
+
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(error).toHaveBeenCalledWith(
+            expect.objectContaining({ model: 'Widget', operation: 'findMany', cacheKey, error: 'redis down' }),
+            expect.stringContaining('identity mismatch'),
+        );
+    });
+
+    test('treats a malformed envelope as an identity mismatch without serving it', async () => {
+        const onCacheEvent = vi.fn();
+        const config = normalizeConfig({
+            logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+            metrics: { onCacheEvent },
+        });
+        const cleanedArgs = { where: { id: 'w1' } };
+        const preparedKey = prepareCacheKey('Widget', 'findMany', cleanedArgs, [], [], config);
+        const cacheKey = buildVersionedCacheKey(preparedKey.baseKey, '');
+        await redis.setString(cacheKey, '{"json":{}}');
+        const query = vi.fn().mockResolvedValue([{ id: 'fresh' }]);
+
+        const result = await readThroughCache({
+            model: 'Widget',
+            operation: 'findMany',
+            args: cleanedArgs,
+            cleanedArgs,
+            preparedRead: {
+                cleanedArgs,
+                normalizedTags: [],
+                tenantScope: [],
+                preparedKey,
+            },
+            query,
+            cacheOptions: {},
+            config,
+            redisAdapter: redis,
+        });
+
+        expect(result).toEqual([{ id: 'fresh' }]);
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(redis.callCounts.delete).toBe(1);
+        expect(redis.store.has(cacheKey)).toBe(false);
+        expect(onCacheEvent).toHaveBeenCalledWith({
+            model: 'Widget',
+            operation: 'findMany',
+            result: 'bypass',
+            path: 'fallback',
+            reason: 'identity-mismatch',
+        });
     });
 });
 

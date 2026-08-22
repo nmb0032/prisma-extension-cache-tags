@@ -22,14 +22,14 @@ export function createFakeRedis(): FakeRedis {
                 delete callCounts[key];
             }
         },
-        async get<T>(key: string): Promise<T | null> {
-            count('get');
+        async getString(key: string): Promise<string | null> {
+            count('getString');
             const raw = store.get(key);
-            return raw === undefined ? null : (JSON.parse(raw) as T);
+            return raw === undefined ? null : raw;
         },
-        async set(key: string, value: unknown): Promise<void> {
-            count('set');
-            store.set(key, JSON.stringify(value));
+        async setString(key: string, value: string): Promise<void> {
+            count('setString');
+            store.set(key, value);
         },
         async delete(key: string): Promise<void> {
             count('delete');

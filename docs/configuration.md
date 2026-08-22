@@ -10,7 +10,7 @@ The extension uses the defaults below when a field is omitted.
 | `enabled` | `boolean` | `true` | Enables or disables the extension globally. When disabled, the extension strips `cache` from arguments and runs the Prisma operation normally. |
 | `defaultTtlSeconds` | `number` | `30` | TTL used by a cached read when `cache.ttlSeconds` is omitted. |
 | `maxTtlSeconds` | `number` | `300` | Upper bound applied to every requested read TTL; tag-version counters are retained for at least this long (normally 10x, with a 3600-second minimum). |
-| `keyPrefix` | `string` | `'prismaCacheTags:v1'` | Prefix for query keys, tag-version keys, and stampede-lock keys. |
+| `keyPrefix` | `string` | `'prismaCacheTags:v2'` | Prefix for query keys, tag-version keys, and stampede-lock keys. v1 entries are not read or migrated. |
 | `cacheNull` | `boolean` | `true` | Allows `null` read results to be cached. |
 | `cacheEmpty` | `boolean` | `true` | Allows empty-array read results to be cached. |
 | `schemaVersion` | `number` | `1` | Adds a schema generation to cache identity. Bump it after a breaking change to cached shapes to invalidate every cache entry at once. |
@@ -22,7 +22,7 @@ The extension uses the defaults below when a field is omitted.
 | `tenantPrecision` | `boolean` | `false` | Opts into tenant-precise reads when every cached read and write is guaranteed to include one of `tenantKeys`; otherwise the safe model-level default is recommended. |
 | `entityKeys` | `string[]` | `['id']` | Prisma argument property names that identify individual records. |
 | `logger` | `Logger` | No-op logger | Receives structured debug, warning, and error events emitted by the extension. The `info` method is part of the interface but is not currently emitted by core operations. |
-| `metrics` | `Metrics` | No-op metrics sink | Receives cache hit and miss events through `onCacheEvent`. |
+| `metrics` | `Metrics` | No-op metrics sink | Receives hit, miss, and bypass events through `onCacheEvent`, with `path` set to `'fallback'` or `'bypass'`. |
 
 ### Tenant keys
 
@@ -153,8 +153,10 @@ const config: CacheTagsConfig = {
 
 ### Metrics
 
-The metrics sink receives `{ model, operation, result }`, where `result` is
-`'hit'` or `'miss'`. The default is a no-op.
+The metrics sink receives `{ model, operation, result, path, reason? }`. `result`
+is `'hit'`, `'miss'`, or `'bypass'`; fallback cache operations use
+`path: 'fallback'`, and permanent canonicalization bypasses use
+`path: 'bypass'`. Identity mismatches include `reason: 'identity-mismatch'`.
 
 ```ts
 import type { CacheTagsConfig } from 'prisma-extension-cache-tags';
@@ -162,7 +164,7 @@ import type { CacheTagsConfig } from 'prisma-extension-cache-tags';
 const config: CacheTagsConfig = {
     metrics: {
         onCacheEvent(event) {
-            console.log(`${event.model}.${event.operation}: ${event.result}`);
+            console.log(`${event.model}.${event.operation}: ${event.result} (${event.path})`);
         },
     },
 };
@@ -187,7 +189,7 @@ Caching is opt-in: add a `cache` object to a supported read operation
 | Name | Type | Default | What it does |
 | --- | --- | --- | --- |
 | `ttlSeconds` | `number` | `config.defaultTtlSeconds` | Requested cache TTL, clamped to `config.maxTtlSeconds` and never below one second (including for zero or negative requests). |
-| `key` | `string` | Generated key | Adds a caller-provided component to cache identity. Model, operation, cleaned arguments, schema, and tag generations still participate, so distinct queries cannot alias through a shared custom key. |
+| `key` | `string` | Generated key | Adds a caller-provided component to the complete canonical identity. Model, operation, cleaned arguments, schema, normalized tags, and tenant scope still participate, so distinct queries cannot alias through a shared custom key. |
 | `enabled` | `boolean` | `true` when `cache` is present | Set to `false` to bypass the cache for one read. |
 | `debug` | `boolean` | `false` | Emits debug hit, miss, and population messages through `logger`. |
 | `tags` | `string[]` | `[]` | Adds explicit invalidation tags. |

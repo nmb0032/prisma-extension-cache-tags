@@ -1,14 +1,13 @@
-import { beforeEach, describe, expect, test } from 'vitest';
-import { generateCacheKey, getTagVersionKey } from '../../src/keys';
+import { describe, expect, test } from 'vitest';
+import { buildVersionedCacheKey, createVersionToken, getTagVersionKey, prepareCacheKey } from '../../src/keys';
 import { noopLogger, noopMetrics } from '../../src/observability';
 import type { NormalizedCacheConfig } from '../../src/types';
-import { createFakeRedis, type FakeRedis } from './fake-redis';
 
 const config: NormalizedCacheConfig = {
     enabled: true,
     defaultTtlSeconds: 30,
     maxTtlSeconds: 300,
-    keyPrefix: 'prismaCacheTags:v1',
+    keyPrefix: 'prismaCacheTags:v2',
     cacheNull: true,
     cacheEmpty: true,
     schemaVersion: 1,
@@ -23,49 +22,51 @@ const config: NormalizedCacheConfig = {
     metrics: noopMetrics,
 };
 
-let redis: FakeRedis;
-
-beforeEach(() => {
-    redis = createFakeRedis();
-});
-
 describe('cache keys', () => {
-    test('are deterministic for identical inputs', async () => {
+    test('are deterministic for identical inputs and insensitive to insertion order', () => {
         const args = { where: { tenantId: 't1' } };
-        const a = await generateCacheKey('Widget', 'findMany', args, ['tenant:t1'], config, redis);
-        const b = await generateCacheKey('Widget', 'findMany', args, ['tenant:t1'], config, redis);
-        expect(a).toBe(b);
+        const a = prepareCacheKey('Widget', 'findMany', args, ['tenant:t1'], ['t1'], config);
+        const b = prepareCacheKey('Widget', 'findMany', { where: { tenantId: 't1' } }, ['tenant:t1'], ['t1'], config);
+        expect(a.baseKey).toBe(b.baseKey);
+        expect(a.identity).toBe(b.identity);
     });
 
-    test('differ when the query args differ', async () => {
-        const a = await generateCacheKey('Widget', 'findMany', { where: { tenantId: 't1' } }, [], config, redis);
-        const b = await generateCacheKey('Widget', 'findMany', { where: { tenantId: 't2' } }, [], config, redis);
-        expect(a).not.toBe(b);
+    test('includes the complete canonical identity in the digest source', () => {
+        const a = prepareCacheKey('Widget', 'findMany', { where: { tenantId: 't1' } }, [], ['t1'], config);
+        const b = prepareCacheKey('Widget', 'findMany', { where: { tenantId: 't2' } }, [], ['t2'], config);
+        expect(a.baseKey).not.toBe(b.baseKey);
+        expect(a.identity).not.toBe(b.identity);
     });
 
-    test('change when a tag version is bumped — this is the invalidation mechanism', async () => {
-        const args = { where: { tenantId: 't1' } };
-        const before = await generateCacheKey('Widget', 'findMany', args, ['tenant:t1'], config, redis);
-
-        await redis.increment(getTagVersionKey('tenant:t1', config), 1);
-
-        const after = await generateCacheKey('Widget', 'findMany', args, ['tenant:t1'], config, redis);
-        expect(after).not.toBe(before);
+    test('sorts and deduplicates tenant scope while retaining normalized tag keys', () => {
+        const prepared = prepareCacheKey('Widget', 'findMany', {}, ['beta', 'alpha', 'beta'], ['tenant-b', 'tenant-a', 'tenant-a'], config);
+        expect(prepared.tenantScope).toEqual(['tenant-a', 'tenant-b']);
+        expect(prepared.tagVersionKeys).toEqual([
+            getTagVersionKey('alpha', config),
+            getTagVersionKey('beta', config),
+        ]);
     });
 
-    test('normalizes tag ordering, whitespace, and limits before generating the key', async () => {
-        const limitedConfig = { ...config, maxTagsPerQuery: 2 };
-        const args = { where: { tenantId: 't1' } };
-        const normalized = await generateCacheKey('Widget', 'findMany', args, ['alpha', 'beta'], limitedConfig, redis);
-        const unnormalized = await generateCacheKey(
-            'Widget',
-            'findMany',
-            args,
-            [' beta ', 'ignored', 'alpha'],
-            limitedConfig,
-            redis,
+    test('creates stable generation tokens and v2 versioned keys', () => {
+        expect(createVersionToken([null, '2', '10'])).toBe('0.2.10');
+        expect(buildVersionedCacheKey('prismaCacheTags:v2:qry:Widget:findMany:abc', '0.2.10')).toBe(
+            'prismaCacheTags:v2:qry:Widget:findMany:abc:0.2.10',
         );
+    });
 
-        expect(unnormalized).toBe(normalized);
+    test('keeps custom keys isolated within model, operation, arguments, tags, and tenant scope', () => {
+        const baseline = prepareCacheKey('Widget', 'findMany', { where: { id: 'w1' } }, ['tag:a'], ['tenant-a'], config, 'shared');
+        const variants = [
+            prepareCacheKey('Part', 'findMany', { where: { id: 'w1' } }, ['tag:a'], ['tenant-a'], config, 'shared'),
+            prepareCacheKey('Widget', 'count', { where: { id: 'w1' } }, ['tag:a'], ['tenant-a'], config, 'shared'),
+            prepareCacheKey('Widget', 'findMany', { where: { id: 'w2' } }, ['tag:a'], ['tenant-a'], config, 'shared'),
+            prepareCacheKey('Widget', 'findMany', { where: { id: 'w1' } }, ['tag:b'], ['tenant-a'], config, 'shared'),
+            prepareCacheKey('Widget', 'findMany', { where: { id: 'w1' } }, ['tag:a'], ['tenant-b'], config, 'shared'),
+        ];
+
+        for (const variant of variants) {
+            expect(variant.baseKey).not.toBe(baseline.baseKey);
+            expect(variant.identity).not.toBe(baseline.identity);
+        }
     });
 });

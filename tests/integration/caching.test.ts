@@ -156,6 +156,43 @@ describe('read-through caching', () => {
         expect(await adapter.getString(cacheKey)).toBeNull();
     });
 
+    test('rejects a malformed envelope, deletes it, and executes Prisma', async () => {
+        await prisma.widget.create({ data: { tenantId: 'tenant-a', name: 'fresh' } });
+        counter.reset();
+
+        const onCacheEvent = vi.fn();
+        const config = normalizeConfig({
+            tenantKeys: ['tenantId'],
+            metrics: { onCacheEvent },
+        });
+        const cacheOptions = { ttlSeconds: 60 };
+        const args = { where: { tenantId: 'tenant-a' } };
+        const resolvedTags = resolveCacheTags('Widget', 'findMany', args, cacheOptions, config, false);
+        const prepared = prepareCacheKey('Widget', 'findMany', args, resolvedTags.tags, resolvedTags.tenantIds, config);
+        const adapter = createNodeRedisAdapter(redis);
+        const versions = await adapter.mgetString(prepared.tagVersionKeys);
+        const cacheKey = buildVersionedCacheKey(prepared.baseKey, createVersionToken(versions));
+        await adapter.setString(cacheKey, 'not-superjson', 60);
+        const cachedPrisma = createCachedClient(redis, counter, { metrics: { onCacheEvent } });
+        dependentClients.push(cachedPrisma);
+
+        const result = await cachedPrisma.widget.findMany({ ...args, cache: cacheOptions });
+
+        expect(result).toHaveLength(1);
+        expect(result[0]?.tenantId).toBe('tenant-a');
+        expect(result[0]?.name).toBe('fresh');
+        expect(counter.byModel.Widget).toBe(1);
+        expect(await adapter.getString(cacheKey)).toBeNull();
+        expect(onCacheEvent).toHaveBeenCalledWith({
+            model: 'Widget',
+            operation: 'findMany',
+            result: 'bypass',
+            path: 'fallback',
+            reason: 'invalid-envelope',
+        });
+        expect(onCacheEvent).not.toHaveBeenCalledWith(expect.objectContaining({ result: 'hit' }));
+    });
+
     test('the cached result is structurally identical to the database result', async () => {
         await prisma.widget.create({ data: { tenantId: 't1', name: 'w1' } });
         counter.reset();

@@ -256,7 +256,7 @@ export interface CacheTagsConfig {
     entityKeys?: string[];
     /** Structured logger. Default: no-op. */
     logger?: Logger;
-    /** Metrics sink for cache hit/miss events. Default: no-op. */
+    /** Metrics sink for cache hit, miss, and bypass events with path/reason observability. Default: no-op. */
     metrics?: Metrics;
 }
 

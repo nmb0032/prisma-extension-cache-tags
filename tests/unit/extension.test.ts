@@ -487,16 +487,23 @@ describe('readThroughCache', () => {
         );
     });
 
-    test('treats a malformed envelope as an identity mismatch without serving it', async () => {
+    test.each([
+        ['malformed SuperJSON', 'not-superjson'],
+        ['missing value', serializeCacheEnvelope({ identity: 'identity', tenantScope: [] } as never)],
+        ['wrong identity type', serializeCacheEnvelope({ identity: 42, tenantScope: [], value: null } as never)],
+        ['wrong tenant scope shape', serializeCacheEnvelope({ identity: 'identity', tenantScope: ['tenant-a', 42], value: null } as never)],
+    ])('treats %s as an invalid envelope without serving it', async (_description, payload) => {
         const onCacheEvent = vi.fn();
+        const debug = vi.fn();
         const config = normalizeConfig({
-            logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+            logger: { debug, info: vi.fn(), warn: vi.fn(), error: vi.fn() },
             metrics: { onCacheEvent },
         });
         const cleanedArgs = { where: { id: 'w1' } };
         const preparedKey = prepareCacheKey('Widget', 'findMany', cleanedArgs, [], [], config);
         const cacheKey = buildVersionedCacheKey(preparedKey.baseKey, '');
-        await redis.setString(cacheKey, '{"json":{}}');
+        await redis.setString(cacheKey, payload);
+        redis.resetCallCounts();
         const query = vi.fn().mockResolvedValue([{ id: 'fresh' }]);
 
         const result = await readThroughCache({
@@ -520,13 +527,69 @@ describe('readThroughCache', () => {
         expect(query).toHaveBeenCalledTimes(1);
         expect(redis.callCounts.delete).toBe(1);
         expect(redis.store.has(cacheKey)).toBe(false);
+        expect(redis.callCounts.setString ?? 0).toBe(0);
+        expect(onCacheEvent).toHaveBeenCalledTimes(1);
         expect(onCacheEvent).toHaveBeenCalledWith({
             model: 'Widget',
             operation: 'findMany',
             result: 'bypass',
             path: 'fallback',
-            reason: 'identity-mismatch',
+            reason: 'invalid-envelope',
         });
+        expect(onCacheEvent).not.toHaveBeenCalledWith(expect.objectContaining({ result: 'hit' }));
+        expect(debug).not.toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Cache hit'));
+    });
+
+    test('queries Prisma and reports an invalid-envelope bypass when deletion fails', async () => {
+        const onCacheEvent = vi.fn();
+        const error = vi.fn();
+        const config = normalizeConfig({
+            logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error },
+            metrics: { onCacheEvent },
+        });
+        const cleanedArgs = { where: { id: 'w1' } };
+        const preparedKey = prepareCacheKey('Widget', 'findMany', cleanedArgs, [], [], config);
+        const cacheKey = buildVersionedCacheKey(preparedKey.baseKey, '');
+        await redis.setString(cacheKey, 'not-superjson');
+        redis.resetCallCounts();
+        const deleteEntry = vi.spyOn(redis, 'delete').mockRejectedValueOnce(new Error('redis down'));
+        const query = vi.fn().mockResolvedValue([{ id: 'fresh' }]);
+
+        const result = await readThroughCache({
+            model: 'Widget',
+            operation: 'findMany',
+            args: cleanedArgs,
+            cleanedArgs,
+            preparedRead: {
+                cleanedArgs,
+                normalizedTags: [],
+                tenantScope: [],
+                preparedKey,
+            },
+            query,
+            cacheOptions: {},
+            config,
+            redisAdapter: redis,
+        });
+
+        expect(result).toEqual([{ id: 'fresh' }]);
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(deleteEntry).toHaveBeenCalledTimes(1);
+        expect(redis.store.has(cacheKey)).toBe(true);
+        expect(redis.callCounts.setString ?? 0).toBe(0);
+        expect(onCacheEvent).toHaveBeenCalledTimes(1);
+        expect(onCacheEvent).toHaveBeenCalledWith({
+            model: 'Widget',
+            operation: 'findMany',
+            result: 'bypass',
+            path: 'fallback',
+            reason: 'invalid-envelope',
+        });
+        expect(onCacheEvent).not.toHaveBeenCalledWith(expect.objectContaining({ result: 'hit' }));
+        expect(error).toHaveBeenCalledWith(
+            expect.objectContaining({ model: 'Widget', operation: 'findMany', cacheKey, error: 'redis down' }),
+            expect.stringContaining('Invalid cache envelope'),
+        );
     });
 });
 

@@ -12,7 +12,7 @@ import { normalizeConfig } from './config';
 import { bumpTagVersions, publishInvalidation, runWithInvalidationContext } from './invalidation';
 import { buildVersionedCacheKey, createVersionToken, prepareCacheKey } from './keys';
 import { acquireCacheLock, releaseCacheLock, waitForCachedValue } from './locks';
-import { deserializeCacheEnvelope, matchesCacheIdentity, serializeCacheEnvelope } from './serialization';
+import { deserializeCacheEnvelope, InvalidCacheEnvelopeError, matchesCacheIdentity, serializeCacheEnvelope } from './serialization';
 import { resolveCacheTags } from './tags';
 import {
     READ_OPERATIONS,
@@ -102,16 +102,51 @@ async function tryGetCachedValue(
     prepared: PreparedRead,
     redisAdapter: RedisAdapter,
     config: NormalizedCacheConfig,
-    onIdentityMismatch: () => void,
+    onBypass: (reason: 'identity-mismatch' | 'invalid-envelope') => void,
 ): Promise<CachedHit | undefined> {
     const payload = await redisAdapter.getString(cacheKey);
     if (payload === null) {
         return undefined;
     }
 
-    const cached = deserializeCacheEnvelope(payload);
+    let cached: ReturnType<typeof deserializeCacheEnvelope>;
+    try {
+        cached = deserializeCacheEnvelope(payload);
+    } catch (error) {
+        if (!(error instanceof InvalidCacheEnvelopeError)) {
+            throw error;
+        }
+
+        onBypass('invalid-envelope');
+        config.logger.warn(
+            { model, operation, cacheKey, reason: 'invalid-envelope' },
+            'Invalid cache envelope; bypassing cached value',
+        );
+        try {
+            await redisAdapter.delete(cacheKey);
+        } catch (deleteError) {
+            config.logger.error(
+                {
+                    model,
+                    operation,
+                    cacheKey,
+                    error: deleteError instanceof Error ? deleteError.message : String(deleteError),
+                },
+                'Invalid cache envelope deletion failed',
+            );
+        }
+        config.metrics.onCacheEvent({
+            model,
+            operation,
+            result: 'bypass',
+            path: 'fallback',
+            reason: 'invalid-envelope',
+        });
+        return undefined;
+    }
+
     if (!matchesCacheIdentity(cached, prepared.preparedKey)) {
-        onIdentityMismatch();
+        onBypass('identity-mismatch');
         const observedTenantScope =
             cached && typeof cached === 'object' && Array.isArray(cached.tenantScope) ? cached.tenantScope : [];
         config.logger.warn(
@@ -165,7 +200,7 @@ export async function readThroughCache(params: {
     const ttlSeconds = normalizeTtl(cacheOptions, config);
     const preparedRead = params.preparedRead ?? prepareRead(model, operation, cleanedArgs, args, cacheOptions, config);
     let cacheKey: string;
-    let identityMismatch = false;
+    let bypassReason: 'identity-mismatch' | 'invalid-envelope' | undefined;
 
     try {
         const versions = await redisAdapter.mgetString(preparedRead.preparedKey.tagVersionKeys);
@@ -180,8 +215,8 @@ export async function readThroughCache(params: {
     }
 
     const getCachedValue = () =>
-        tryGetCachedValue(model, operation, cacheKey, preparedRead, redisAdapter, config, () => {
-            identityMismatch = true;
+        tryGetCachedValue(model, operation, cacheKey, preparedRead, redisAdapter, config, (reason) => {
+            bypassReason ??= reason;
         });
 
     try {
@@ -200,11 +235,15 @@ export async function readThroughCache(params: {
         );
     }
 
-    if (!identityMismatch) {
+    if (!bypassReason) {
         if (cacheOptions.debug) {
             config.logger.debug({ model, operation, cacheKey, tags: preparedRead.normalizedTags }, 'Cache miss');
         }
         config.metrics.onCacheEvent({ model, operation, result: 'miss', path: 'fallback' });
+    }
+
+    if (bypassReason === 'invalid-envelope') {
+        return query(cleanedArgs);
     }
 
     let lock = null;
@@ -237,7 +276,7 @@ export async function readThroughCache(params: {
 
         const result = await query(cleanedArgs);
 
-        if (shouldPopulateCache && !identityMismatch && shouldCacheResult(result, config)) {
+        if (shouldPopulateCache && !bypassReason && shouldCacheResult(result, config)) {
             try {
                 await redisAdapter.setString(
                     cacheKey,

@@ -8,13 +8,25 @@ import type {
     OptimizedLookupInput,
     OptimizedLookupResult,
     OptimizedRedisPrimitives,
+    OptimizedScriptCallbacks,
 } from './types';
 
-export type { CacheScriptEvent, OptimizedLookupInput, OptimizedLookupResult, OptimizedRedisPrimitives } from './types';
+export type {
+    CacheScriptEvent,
+    OptimizedLookupInput,
+    OptimizedLookupResult,
+    OptimizedRedisPrimitives,
+    OptimizedScriptCallbacks,
+} from './types';
+
 export type ScriptEventHandler = (event: CacheScriptEvent) => void;
 export type ScriptFailureHandler = (event: { primitive: CacheScriptEvent['primitive']; retry: boolean; error: unknown }) => void;
 
 type ScriptResult = string | number;
+
+interface RetryState {
+    value: boolean;
+}
 
 function asScriptResult(value: unknown): ScriptResult {
     if (typeof value === 'string' || typeof value === 'number') {
@@ -75,116 +87,118 @@ function parseVersions(result: unknown): number[] {
     });
 }
 
-export interface OptimizedRedisPrimitivesWithEvents extends OptimizedRedisPrimitives {
-    setScriptEventHandler(handler: ScriptEventHandler): () => void;
-    setScriptFailureHandler(handler: ScriptFailureHandler): () => void;
+function reportFailure(
+    primitive: CacheScriptEvent['primitive'],
+    callbacks: OptimizedScriptCallbacks | undefined,
+    event: { retry: boolean; error: unknown },
+): void {
+    callbacks?.onScriptEvent?.({ primitive, result: 'failure', retry: event.retry });
+    callbacks?.onScriptFailure?.(event);
 }
 
-export function createOptimizedRedisPrimitives(
-    operations: ScriptOperations,
-    initialHandler?: ScriptEventHandler,
-): OptimizedRedisPrimitivesWithEvents {
-    const handlers = new Set<ScriptEventHandler>();
-    const failureHandlers = new Set<ScriptFailureHandler>();
-    if (initialHandler) {
-        handlers.add(initialHandler);
+function createExecutorEvents(
+    primitive: CacheScriptEvent['primitive'],
+    callbacks: OptimizedScriptCallbacks | undefined,
+    retryState: RetryState,
+): {
+    onReload(retry: boolean): void;
+    onFailure(event: { retry: boolean; error: unknown }): void;
+} {
+    return {
+        onReload(retry) {
+            retryState.value ||= retry;
+            callbacks?.onScriptEvent?.({ primitive, result: 'reload', retry });
+        },
+        onFailure(event) {
+            reportFailure(primitive, callbacks, event);
+        },
+    };
+}
+
+function parseWithFailure<T>(
+    primitive: CacheScriptEvent['primitive'],
+    result: unknown,
+    callbacks: OptimizedScriptCallbacks | undefined,
+    retryState: RetryState,
+    parser: (result: unknown) => T,
+): T {
+    try {
+        return parser(result);
+    } catch (error) {
+        reportFailure(primitive, callbacks, { retry: retryState.value, error });
+        throw error;
     }
+}
 
-    const notify = (event: CacheScriptEvent) => {
-        for (const handler of handlers) {
-            handler(event);
-        }
-    };
-    const notifyFailure = (primitive: CacheScriptEvent['primitive'], event: { retry: boolean; error: unknown }) => {
-        notify({ primitive, result: 'failure', retry: event.retry });
-        for (const handler of failureHandlers) {
-            handler({ primitive, ...event });
-        }
-    };
+export interface OptimizedScriptObservation {
+    callbacks: OptimizedScriptCallbacks;
+    failureDetails(): { retry: boolean; error: unknown } | undefined;
+}
 
-    const executorFor = (primitive: CacheScriptEvent['primitive'], source: string) =>
-        createScriptExecutor(source, operations, {
-            onReload: (retry) => notify({ primitive, result: 'reload', retry }),
-            onFailure: (event) => notifyFailure(primitive, event),
-        });
+/**
+ * Creates callbacks for one optimized primitive invocation. The returned
+ * callbacks hold no registration on the shared primitives, so they cannot
+ * observe another request or outlive this invocation.
+ */
+export function createOptimizedScriptObservation(metrics: Metrics): OptimizedScriptObservation {
+    let lastFailure: { retry: boolean; error: unknown } | undefined;
 
-    const lookupExecutor = executorFor('lookupVersioned', VERSIONED_LOOKUP_SCRIPT);
-    const populateExecutor = executorFor('populateAndRelease', POPULATE_RELEASE_SCRIPT);
-    const bumpExecutor = executorFor('bumpTagVersions', BUMP_VERSIONS_SCRIPT);
-
-    const primitives: OptimizedRedisPrimitivesWithEvents = {
-        async lookupVersioned(input: OptimizedLookupInput): Promise<OptimizedLookupResult> {
-            const result = await lookupExecutor.execute(input.tagVersionKeys, [
-                input.baseKey,
-                input.lockToken ?? '',
-                String(input.lockTtlMs ?? 0),
-            ]);
-            return parseLookupResult(result);
+    return {
+        callbacks: {
+            onScriptEvent: (event) => {
+                metrics.onScriptEvent?.(event);
+            },
+            onScriptFailure: (event) => {
+                lastFailure = event;
+            },
         },
-        async populateAndRelease(input): Promise<boolean> {
-            const result = await populateExecutor.execute([input.cacheKey], [
-                input.lockToken,
-                input.value,
-                String(input.ttlSeconds),
-            ]);
-            return parseBooleanResult(result);
+        failureDetails: () => lastFailure,
+    };
+}
+
+export function createOptimizedRedisPrimitives(operations: ScriptOperations): OptimizedRedisPrimitives {
+    const lookupExecutor = createScriptExecutor(VERSIONED_LOOKUP_SCRIPT, operations);
+    const populateExecutor = createScriptExecutor(POPULATE_RELEASE_SCRIPT, operations);
+    const bumpExecutor = createScriptExecutor(BUMP_VERSIONS_SCRIPT, operations);
+
+    return {
+        async lookupVersioned(input: OptimizedLookupInput, callbacks?: OptimizedScriptCallbacks): Promise<OptimizedLookupResult> {
+            const retryState: RetryState = { value: false };
+            const result = await lookupExecutor.execute(
+                input.tagVersionKeys,
+                [input.baseKey, input.lockToken ?? '', String(input.lockTtlMs ?? 0)],
+                createExecutorEvents('lookupVersioned', callbacks, retryState),
+            );
+            return parseWithFailure('lookupVersioned', result, callbacks, retryState, parseLookupResult);
         },
-        async bumpTagVersions(keys: string[], ttlSeconds: number): Promise<number[]> {
+        async populateAndRelease(input, callbacks?: OptimizedScriptCallbacks): Promise<boolean> {
+            const retryState: RetryState = { value: false };
+            const result = await populateExecutor.execute(
+                [input.cacheKey],
+                [input.lockToken, input.value, String(input.ttlSeconds)],
+                createExecutorEvents('populateAndRelease', callbacks, retryState),
+            );
+            return parseWithFailure('populateAndRelease', result, callbacks, retryState, parseBooleanResult);
+        },
+        async bumpTagVersions(keys: string[], ttlSeconds: number, callbacks?: OptimizedScriptCallbacks): Promise<number[]> {
             const uniqueKeys = Array.from(new Set(keys));
             if (uniqueKeys.length === 0) {
                 return [];
             }
-            const result = await bumpExecutor.execute(uniqueKeys, [String(ttlSeconds)]);
-            const versions = parseVersions(result);
+
+            const retryState: RetryState = { value: false };
+            const result = await bumpExecutor.execute(
+                uniqueKeys,
+                [String(ttlSeconds)],
+                createExecutorEvents('bumpTagVersions', callbacks, retryState),
+            );
+            const versions = parseWithFailure('bumpTagVersions', result, callbacks, retryState, parseVersions);
             if (versions.length !== uniqueKeys.length) {
-                throw new Error('Invalid tag-version response');
+                const error = new Error('Invalid tag-version response');
+                reportFailure('bumpTagVersions', callbacks, { retry: retryState.value, error });
+                throw error;
             }
             return versions;
-        },
-        setScriptEventHandler(handler: ScriptEventHandler): () => void {
-            handlers.add(handler);
-            return () => {
-                handlers.delete(handler);
-            };
-        },
-        setScriptFailureHandler(handler: ScriptFailureHandler): () => void {
-            failureHandlers.add(handler);
-            return () => {
-                failureHandlers.delete(handler);
-            };
-        },
-    };
-
-    return primitives;
-}
-
-export function observeOptimizedScripts(
-    primitives: OptimizedRedisPrimitives | undefined,
-    metrics: Metrics,
-): {
-    unregister(): void;
-    failureObserved(): boolean;
-    failureDetails(): { retry: boolean; error: unknown } | undefined;
-} {
-    const withEvents = primitives as Partial<OptimizedRedisPrimitivesWithEvents> | undefined;
-    let observedFailure = false;
-    let lastFailure: { retry: boolean; error: unknown } | undefined;
-    const onEvent = (event: CacheScriptEvent) => {
-        metrics.onScriptEvent?.(event);
-    };
-    const onFailure: ScriptFailureHandler = ({ retry, error }) => {
-        observedFailure = true;
-        lastFailure = { retry, error };
-    };
-    const unregisterEvent = withEvents?.setScriptEventHandler?.(onEvent);
-    const unregisterFailure = withEvents?.setScriptFailureHandler?.(onFailure);
-
-    return {
-        failureObserved: () => observedFailure,
-        failureDetails: () => lastFailure,
-        unregister() {
-            unregisterEvent?.();
-            unregisterFailure?.();
         },
     };
 }

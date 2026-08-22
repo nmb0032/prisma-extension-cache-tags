@@ -21,6 +21,11 @@ export interface OptimizedLookupInput {
     lockTtlMs?: number;
 }
 
+export interface OptimizedScriptCallbacks {
+    onScriptEvent?(event: CacheScriptEvent): void;
+    onScriptFailure?(event: { retry: boolean; error: unknown }): void;
+}
+
 export interface OptimizedLookupResult {
     cacheKey: string;
     value: string | null;
@@ -28,14 +33,14 @@ export interface OptimizedLookupResult {
 }
 
 export interface OptimizedRedisPrimitives {
-    lookupVersioned(input: OptimizedLookupInput): Promise<OptimizedLookupResult>;
+    lookupVersioned(input: OptimizedLookupInput, callbacks?: OptimizedScriptCallbacks): Promise<OptimizedLookupResult>;
     populateAndRelease(input: {
         cacheKey: string;
         lockToken: string;
         value: string;
         ttlSeconds: number;
-    }): Promise<boolean>;
-    bumpTagVersions(keys: string[], ttlSeconds: number): Promise<number[]>;
+    }, callbacks?: OptimizedScriptCallbacks): Promise<boolean>;
+    bumpTagVersions(keys: string[], ttlSeconds: number, callbacks?: OptimizedScriptCallbacks): Promise<number[]>;
 }
 
 /**

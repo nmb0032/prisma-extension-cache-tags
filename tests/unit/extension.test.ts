@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
+import { createOptimizedRedisPrimitives } from '../../src/optimized';
 import { buildVersionedCacheKey, getTagVersionKey, prepareCacheKey } from '../../src/keys';
 import { createCacheTagsExtension, handleWrite, normalizeConfig, readThroughCache } from '../../src/extension';
 import { acquireCacheLock, releaseCacheLock } from '../../src/locks';
@@ -194,6 +195,7 @@ describe('readThroughCache', () => {
         expect(query).toHaveBeenCalledTimes(1);
         expect(optimized.populateAndRelease).toHaveBeenCalledWith(
             expect.objectContaining({ cacheKey, ttlSeconds: 60, value: expect.any(String) }),
+            expect.objectContaining({ onScriptEvent: expect.any(Function), onScriptFailure: expect.any(Function) }),
         );
         expect(redis.callCounts.deleteIfValue ?? 0).toBe(0);
     });
@@ -230,6 +232,85 @@ describe('readThroughCache', () => {
 
         expect(query).toHaveBeenCalledTimes(1);
         expect(optimized.populateAndRelease).toHaveBeenCalledTimes(1);
+    });
+
+    test('emits one lookup failure for malformed optimized replies before using the command fallback', async () => {
+        const warn = vi.fn();
+        const onScriptEvent = vi.fn();
+        const config = normalizeConfig({
+            logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
+            metrics: { onCacheEvent: vi.fn(), onScriptEvent },
+        });
+        const optimized = createOptimizedRedisPrimitives({
+            load: vi.fn().mockResolvedValue('lookup-sha'),
+            evalSha: vi.fn().mockResolvedValue(['malformed']),
+        });
+        const query = vi.fn().mockResolvedValue([{ id: 'database' }]);
+
+        await expect(
+            readThroughCache({
+                model: 'Widget',
+                operation: 'findMany',
+                args: {},
+                cleanedArgs: {},
+                query,
+                cacheOptions: {},
+                config,
+                redisAdapter: { ...redis, optimized },
+            }),
+        ).resolves.toEqual([{ id: 'database' }]);
+
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(onScriptEvent).toHaveBeenCalledTimes(1);
+        expect(onScriptEvent).toHaveBeenCalledWith({
+            primitive: 'lookupVersioned',
+            result: 'failure',
+            retry: false,
+        });
+        expect(warn).toHaveBeenCalledWith(
+            expect.objectContaining({ primitive: 'lookupVersioned', retry: false, error: 'Invalid versioned lookup response' }),
+            'Redis cache script failed',
+        );
+    });
+
+    test('emits one population failure for malformed optimized replies and releases the owner lock safely', async () => {
+        const warn = vi.fn();
+        const onScriptEvent = vi.fn();
+        const config = normalizeConfig({
+            logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
+            metrics: { onCacheEvent: vi.fn(), onScriptEvent },
+        });
+        const optimized = createOptimizedRedisPrimitives({
+            load: vi.fn().mockResolvedValue('script-sha'),
+            evalSha: vi.fn().mockResolvedValueOnce(['query-key:', '', '0', '1']).mockResolvedValueOnce(2),
+        });
+        const query = vi.fn().mockResolvedValue({ id: 'database' });
+
+        await expect(
+            readThroughCache({
+                model: 'Widget',
+                operation: 'findUnique',
+                args: { where: { id: 'w1' } },
+                cleanedArgs: { where: { id: 'w1' } },
+                query,
+                cacheOptions: {},
+                config,
+                redisAdapter: { ...redis, optimized },
+            }),
+        ).resolves.toEqual({ id: 'database' });
+
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(onScriptEvent).toHaveBeenCalledTimes(1);
+        expect(onScriptEvent).toHaveBeenCalledWith({
+            primitive: 'populateAndRelease',
+            result: 'failure',
+            retry: false,
+        });
+        expect(warn).toHaveBeenCalledWith(
+            expect.objectContaining({ primitive: 'populateAndRelease', retry: false, error: 'Invalid Redis script flag' }),
+            'Redis cache script failed',
+        );
+        expect(redis.callCounts.deleteIfValue).toBe(1);
     });
 
     test('rejects an optimized malformed payload without repopulating that generation', async () => {

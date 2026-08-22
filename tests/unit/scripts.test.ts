@@ -57,7 +57,7 @@ describe('Redis script executor', () => {
         expect(operations.evalSha).toHaveBeenCalledTimes(2);
     });
 
-    test('shares a NOSCRIPT reload between concurrent retries', async () => {
+    test('shares a NOSCRIPT reload between concurrent retries while scoping callbacks', async () => {
         const operations = {
             load: vi.fn().mockResolvedValueOnce('sha-1').mockResolvedValueOnce('sha-2'),
             evalSha: vi
@@ -68,9 +68,20 @@ describe('Redis script executor', () => {
                 .mockResolvedValueOnce('second'),
         };
         const executor = createScriptExecutor('return 1', operations);
+        const firstReload = vi.fn();
+        const secondReload = vi.fn();
 
-        await expect(Promise.all([executor.execute([], []), executor.execute([], [])])).resolves.toEqual(['first', 'second']);
+        await expect(
+            Promise.all([
+                executor.execute([], [], { onReload: firstReload }),
+                executor.execute([], [], { onReload: secondReload }),
+            ]),
+        ).resolves.toEqual(['first', 'second']);
         expect(operations.load).toHaveBeenCalledTimes(2);
+        expect(firstReload).toHaveBeenCalledTimes(1);
+        expect(firstReload).toHaveBeenCalledWith(true);
+        expect(secondReload).toHaveBeenCalledTimes(1);
+        expect(secondReload).toHaveBeenCalledWith(true);
     });
 
     test('propagates non-NOSCRIPT errors without retrying', async () => {
@@ -94,9 +105,9 @@ describe('Redis script executor', () => {
             load: vi.fn().mockResolvedValueOnce('sha-1').mockResolvedValueOnce('sha-2'),
             evalSha: vi.fn().mockRejectedValueOnce(new Error('NOSCRIPT missing')).mockRejectedValueOnce(failure),
         };
-        const executor = createScriptExecutor('return 1', operations, { onReload, onFailure });
+        const executor = createScriptExecutor('return 1', operations);
 
-        await expect(executor.execute([], [])).rejects.toBe(failure);
+        await expect(executor.execute([], [], { onReload, onFailure })).rejects.toBe(failure);
         expect(onReload).toHaveBeenCalledWith(true);
         expect(onFailure).toHaveBeenCalledWith({ retry: true, error: failure });
         expect(operations.load).toHaveBeenCalledTimes(2);

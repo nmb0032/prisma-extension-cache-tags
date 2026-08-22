@@ -8,6 +8,7 @@ import {
 } from '../../src/invalidation';
 import { normalizeConfig } from '../../src/config';
 import { getTagVersionKey } from '../../src/keys';
+import { createOptimizedRedisPrimitives } from '../../src/optimized';
 import { noopLogger, noopMetrics } from '../../src/observability';
 import type { NormalizedCacheConfig } from '../../src/types';
 import { createFakeRedis, type FakeRedis } from './fake-redis';
@@ -52,6 +53,7 @@ describe('bumpTagVersions', () => {
         expect(optimizedBumpTagVersions).toHaveBeenCalledWith(
             [getTagVersionKey('tenant:t1', config), getTagVersionKey('tenant:t2', config)],
             3600,
+            expect.objectContaining({ onScriptEvent: expect.any(Function), onScriptFailure: expect.any(Function) }),
         );
         expect(redis.callCounts.increment ?? 0).toBe(0);
     });
@@ -83,6 +85,35 @@ describe('bumpTagVersions', () => {
         expect(warn).toHaveBeenCalledWith(
             expect.objectContaining({ primitive: 'bumpTagVersions', retry: false, error: 'script connection lost' }),
             expect.stringContaining('fallback'),
+        );
+    });
+
+    test('emits one invalidation failure for malformed optimized versions before fallback', async () => {
+        const onScriptEvent = vi.fn();
+        const warn = vi.fn();
+        const malformedConfig = {
+            ...config,
+            logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
+            metrics: { ...config.metrics, onScriptEvent },
+        };
+        const optimized = createOptimizedRedisPrimitives({
+            load: vi.fn().mockResolvedValue('bump-sha'),
+            evalSha: vi.fn().mockResolvedValue(['not-a-number']),
+        });
+
+        await bumpTagVersions(['tenant:t1', 'tenant:t2'], malformedConfig, { ...redis, optimized });
+
+        expect(onScriptEvent).toHaveBeenCalledTimes(1);
+        expect(onScriptEvent).toHaveBeenCalledWith({
+            primitive: 'bumpTagVersions',
+            result: 'failure',
+            retry: false,
+        });
+        expect(redis.callCounts.increment).toBe(2);
+        expect(redis.callCounts.expire).toBe(2);
+        expect(warn).toHaveBeenCalledWith(
+            expect.objectContaining({ primitive: 'bumpTagVersions', retry: false, error: 'Invalid tag-version response' }),
+            'Optimized invalidation failed; using command fallback',
         );
     });
 

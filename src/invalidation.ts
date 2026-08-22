@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { normalizeConfig } from './config';
 import { getTagVersionKey } from './keys';
-import { observeOptimizedScripts } from './optimized';
+import { createOptimizedScriptObservation } from './optimized';
 import type { CacheTagsConfig, NormalizedCacheConfig, RedisAdapter } from './types';
 
 type InvalidationContext = {
@@ -38,11 +38,12 @@ export async function bumpTagVersions(tags: string[], config: NormalizedCacheCon
     const optimized = redisAdapter.optimized;
 
     if (optimized) {
-        const observation = observeOptimizedScripts(optimized, config.metrics);
+        const observation = createOptimizedScriptObservation(config.metrics);
         try {
             const versions = await optimized.bumpTagVersions(
                 uniqueTags.map((tag) => getTagVersionKey(tag, config)),
                 versionTtlSeconds,
+                observation.callbacks,
             );
             if (versions.length !== uniqueTags.length) {
                 throw new Error('Optimized invalidation returned an unexpected version count');
@@ -66,8 +67,6 @@ export async function bumpTagVersions(tags: string[], config: NormalizedCacheCon
                 },
                 'Optimized invalidation failed; using command fallback',
             );
-        } finally {
-            observation.unregister();
         }
     }
 

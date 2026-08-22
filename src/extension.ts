@@ -13,7 +13,7 @@ import { normalizeConfig } from './config';
 import { bumpTagVersions, publishInvalidation, runWithInvalidationContext } from './invalidation';
 import { buildVersionedCacheKey, createVersionToken, getCacheLockKey, prepareCacheKey } from './keys';
 import { acquireCacheLock, releaseCacheLock, resolveStampedeOptions, waitForCachedValue } from './locks';
-import { observeOptimizedScripts } from './optimized';
+import { createOptimizedScriptObservation } from './optimized';
 import { deserializeCacheEnvelope, InvalidCacheEnvelopeError, matchesCacheIdentity, serializeCacheEnvelope } from './serialization';
 import { resolveCacheTags } from './tags';
 import {
@@ -348,107 +348,111 @@ async function readThroughFallback(params: ReadThroughParams, preparedRead: Prep
 async function readThroughOptimized(params: ReadThroughParams, preparedRead: PreparedRead, ttlSeconds: number): Promise<unknown> {
     const { model, operation, cleanedArgs, query, cacheOptions, config, redisAdapter } = params;
     const optimized = redisAdapter.optimized!;
-    const observation = observeOptimizedScripts(optimized, config.metrics);
     let bypassReason: CacheBypassReason | undefined;
     const { lockTtlMs } = resolveStampedeOptions(cacheOptions, config);
     const lockToken = randomUUID();
 
+    let lookup: { cacheKey: string; value: string | null; lockAcquired: boolean };
+    const lookupObservation = createOptimizedScriptObservation(config.metrics);
     try {
-        let lookup: { cacheKey: string; value: string | null; lockAcquired: boolean };
-        try {
-            lookup = await optimized.lookupVersioned({
+        lookup = await optimized.lookupVersioned(
+            {
                 baseKey: preparedRead.preparedKey.baseKey,
                 tagVersionKeys: preparedRead.preparedKey.tagVersionKeys,
                 lockToken,
                 lockTtlMs,
-            });
-        } catch (error) {
-            const failure = observation.failureDetails();
-            logScriptFailure(config, 'lookupVersioned', failure?.error ?? error, failure?.retry ?? false);
-            return readThroughFallback(params, preparedRead, ttlSeconds);
-        }
+            },
+            lookupObservation.callbacks,
+        );
+    } catch (error) {
+        const failure = lookupObservation.failureDetails();
+        logScriptFailure(config, 'lookupVersioned', failure?.error ?? error, failure?.retry ?? false);
+        return readThroughFallback(params, preparedRead, ttlSeconds);
+    }
 
-        const getCachedValue = () =>
-            tryGetCachedValue(
-                model,
-                operation,
-                lookup.cacheKey,
-                preparedRead,
-                redisAdapter,
-                config,
-                'optimized',
-                (reason) => {
-                    bypassReason ??= reason;
-                },
-            );
+    const getCachedValue = () =>
+        tryGetCachedValue(
+            model,
+            operation,
+            lookup.cacheKey,
+            preparedRead,
+            redisAdapter,
+            config,
+            'optimized',
+            (reason) => {
+                bypassReason ??= reason;
+            },
+        );
 
-        if (lookup.value !== null) {
-            const cachedValue = await validateCachedPayload(
-                model,
-                operation,
-                lookup.cacheKey,
-                lookup.value,
-                preparedRead,
-                redisAdapter,
-                config,
-                'optimized',
-                (reason) => {
-                    bypassReason ??= reason;
-                },
-            );
-            if (cachedValue !== undefined) {
-                if (cacheOptions.debug) {
-                    config.logger.debug(
-                        { model, operation, cacheKey: lookup.cacheKey, tags: preparedRead.normalizedTags },
-                        'Cache hit',
-                    );
-                }
-                config.metrics.onCacheEvent({ model, operation, result: 'hit', path: 'optimized' });
-                return cachedValue.value;
-            }
-            return query(cleanedArgs);
-        }
-
-        if (!bypassReason) {
+    if (lookup.value !== null) {
+        const cachedValue = await validateCachedPayload(
+            model,
+            operation,
+            lookup.cacheKey,
+            lookup.value,
+            preparedRead,
+            redisAdapter,
+            config,
+            'optimized',
+            (reason) => {
+                bypassReason ??= reason;
+            },
+        );
+        if (cachedValue !== undefined) {
             if (cacheOptions.debug) {
                 config.logger.debug(
                     { model, operation, cacheKey: lookup.cacheKey, tags: preparedRead.normalizedTags },
-                    'Cache miss',
+                    'Cache hit',
                 );
             }
-            config.metrics.onCacheEvent({ model, operation, result: 'miss', path: 'optimized' });
+            config.metrics.onCacheEvent({ model, operation, result: 'hit', path: 'optimized' });
+            return cachedValue.value;
         }
+        return query(cleanedArgs);
+    }
 
-        if (!lookup.lockAcquired) {
-            let waitedValue: CachedHit | undefined;
-            try {
-                waitedValue = await waitForCachedValue(
-                    lookup.cacheKey,
-                    cacheOptions,
-                    config,
-                    redisAdapter,
-                    getCachedValue,
-                    () => bypassReason !== undefined,
-                );
-            } catch (error) {
-                config.logger.warn(
-                    { model, operation, cacheKey: lookup.cacheKey, error: errorMessage(error) },
-                    'Cache waiter read failed; falling back to Prisma query',
-                );
-            }
-            if (waitedValue !== undefined) {
-                config.metrics.onCacheEvent({ model, operation, result: 'hit', path: 'optimized' });
-                return waitedValue.value;
-            }
-            return query(cleanedArgs);
+    if (!bypassReason) {
+        if (cacheOptions.debug) {
+            config.logger.debug(
+                { model, operation, cacheKey: lookup.cacheKey, tags: preparedRead.normalizedTags },
+                'Cache miss',
+            );
         }
+        config.metrics.onCacheEvent({ model, operation, result: 'miss', path: 'optimized' });
+    }
 
-        let populated = false;
+    if (!lookup.lockAcquired) {
+        let waitedValue: CachedHit | undefined;
         try {
-            const result = await query(cleanedArgs);
-            if (!bypassReason && shouldCacheResult(result, config)) {
-                try {
-                    populated = await optimized.populateAndRelease({
+            waitedValue = await waitForCachedValue(
+                lookup.cacheKey,
+                cacheOptions,
+                config,
+                redisAdapter,
+                getCachedValue,
+                () => bypassReason !== undefined,
+            );
+        } catch (error) {
+            config.logger.warn(
+                { model, operation, cacheKey: lookup.cacheKey, error: errorMessage(error) },
+                'Cache waiter read failed; falling back to Prisma query',
+            );
+        }
+        if (waitedValue !== undefined) {
+            config.metrics.onCacheEvent({ model, operation, result: 'hit', path: 'optimized' });
+            return waitedValue.value;
+        }
+        return query(cleanedArgs);
+    }
+
+    let populated = false;
+    try {
+        const result = await query(cleanedArgs);
+        if (!bypassReason && shouldCacheResult(result, config)) {
+            const populateObservation = createOptimizedScriptObservation(config.metrics);
+            try {
+                populated = await optimized.populateAndRelease(
+                    {
                         cacheKey: lookup.cacheKey,
                         lockToken,
                         value: serializeCacheEnvelope({
@@ -457,26 +461,25 @@ async function readThroughOptimized(params: ReadThroughParams, preparedRead: Pre
                             value: result,
                         }),
                         ttlSeconds,
-                    });
-                    if (populated && cacheOptions.debug) {
-                        config.logger.debug(
-                            { model, operation, cacheKey: lookup.cacheKey, ttlSeconds, tags: preparedRead.normalizedTags },
-                            'Cached query result',
-                        );
-                    }
-                } catch (error) {
-                    const failure = observation.failureDetails();
-                    logScriptFailure(config, 'populateAndRelease', failure?.error ?? error, failure?.retry ?? false);
+                    },
+                    populateObservation.callbacks,
+                );
+                if (populated && cacheOptions.debug) {
+                    config.logger.debug(
+                        { model, operation, cacheKey: lookup.cacheKey, ttlSeconds, tags: preparedRead.normalizedTags },
+                        'Cached query result',
+                    );
                 }
-            }
-            return result;
-        } finally {
-            if (!populated) {
-                await releaseCacheLock({ key: getCacheLockKey(lookup.cacheKey), token: lockToken }, redisAdapter, config);
+            } catch (error) {
+                const failure = populateObservation.failureDetails();
+                logScriptFailure(config, 'populateAndRelease', failure?.error ?? error, failure?.retry ?? false);
             }
         }
+        return result;
     } finally {
-        observation.unregister();
+        if (!populated) {
+            await releaseCacheLock({ key: getCacheLockKey(lookup.cacheKey), token: lockToken }, redisAdapter, config);
+        }
     }
 }
 

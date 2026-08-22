@@ -21,6 +21,7 @@ export type {
     OptimizedLookupInput,
     OptimizedLookupResult,
     OptimizedRedisPrimitives,
+    OptimizedScriptCallbacks,
     PreparedCacheKey,
     RedisAdapter,
 } from './types';

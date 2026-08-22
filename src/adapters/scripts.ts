@@ -25,8 +25,7 @@ function isNoScriptError(error: unknown): boolean {
 export function createScriptExecutor(
     source: string,
     operations: ScriptOperations,
-    events?: ScriptExecutorEvents,
-): { execute(keys: string[], args: string[]): Promise<unknown> } {
+): { execute(keys: string[], args: string[], events?: ScriptExecutorEvents): Promise<unknown> } {
     let loadPromise: Promise<string> | undefined;
     let reloadPromise: Promise<string> | undefined;
     let loadedSha: string | undefined;
@@ -72,7 +71,7 @@ export function createScriptExecutor(
     };
 
     return {
-        async execute(keys: string[], args: string[]): Promise<unknown> {
+        async execute(keys: string[], args: string[], events?: ScriptExecutorEvents): Promise<unknown> {
             let sha: string;
             try {
                 sha = await load();

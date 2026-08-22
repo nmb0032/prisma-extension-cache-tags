@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { CanonicalizationError, canonicalizePrismaValue, hashCanonicalValue } from './canonical';
+import { CanonicalizationError, canonicalizePrismaValue } from './canonical';
 import type { NormalizedCacheConfig, PreparedCacheKey, RedisAdapter } from './types';
 
 export type { PreparedCacheKey } from './types';
@@ -8,8 +8,8 @@ export function getTagVersionKey(tag: string, config: NormalizedCacheConfig): st
     return `${config.keyPrefix}:tagver:${tag}`;
 }
 
-export function getCacheLockKey(cacheKey: string, config: NormalizedCacheConfig): string {
-    return `${config.keyPrefix}:lock:${hashCanonicalValue(cacheKey)}`;
+export function getCacheLockKey(cacheKey: string): string {
+    return `${cacheKey}:lock`;
 }
 
 export function createVersionToken(values: readonly (string | null)[]): string {

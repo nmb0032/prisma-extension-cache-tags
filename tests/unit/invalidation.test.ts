@@ -38,6 +38,54 @@ beforeEach(() => {
 });
 
 describe('bumpTagVersions', () => {
+    test('uses one optimized primitive call with unique version keys and returns its versions', async () => {
+        const optimizedBumpTagVersions = vi.fn().mockResolvedValue([1, 1]);
+        const optimized = {
+            lookupVersioned: vi.fn(),
+            populateAndRelease: vi.fn(),
+            bumpTagVersions: optimizedBumpTagVersions,
+        };
+
+        await bumpTagVersions(['tenant:t1', 'tenant:t1', 'tenant:t2'], { ...config }, { ...redis, optimized });
+
+        expect(optimizedBumpTagVersions).toHaveBeenCalledTimes(1);
+        expect(optimizedBumpTagVersions).toHaveBeenCalledWith(
+            [getTagVersionKey('tenant:t1', config), getTagVersionKey('tenant:t2', config)],
+            3600,
+        );
+        expect(redis.callCounts.increment ?? 0).toBe(0);
+    });
+
+    test('falls back after a partial optimized bump and expires every tag', async () => {
+        const firstKey = getTagVersionKey('tenant:t1', config);
+        const secondKey = getTagVersionKey('tenant:t2', config);
+        redis.store.set(firstKey, '1');
+        const warn = vi.fn();
+        const fallbackConfig = {
+            ...config,
+            logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
+        };
+        const optimized = {
+            lookupVersioned: vi.fn(),
+            populateAndRelease: vi.fn(),
+            bumpTagVersions: vi.fn().mockImplementation(async (keys: string[]) => {
+                redis.store.set(keys[0]!, '1');
+                throw new Error('script connection lost');
+            }),
+        };
+
+        await bumpTagVersions(['tenant:t1', 'tenant:t2'], fallbackConfig, { ...redis, optimized });
+
+        expect(redis.store.get(firstKey)).toBe('2');
+        expect(redis.store.get(secondKey)).toBe('1');
+        expect(redis.callCounts.increment).toBe(2);
+        expect(redis.callCounts.expire).toBe(2);
+        expect(warn).toHaveBeenCalledWith(
+            expect.objectContaining({ primitive: 'bumpTagVersions', retry: false, error: 'script connection lost' }),
+            expect.stringContaining('fallback'),
+        );
+    });
+
     test('increments each tag version exactly once', async () => {
         await bumpTagVersions(['tenant:t1', 'tenant:t1:model:Widget'], config, redis);
 

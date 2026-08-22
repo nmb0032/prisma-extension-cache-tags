@@ -14,6 +14,30 @@ export interface CachedEnvelopeV2 {
     value: unknown;
 }
 
+export interface OptimizedLookupInput {
+    baseKey: string;
+    tagVersionKeys: string[];
+    lockToken?: string;
+    lockTtlMs?: number;
+}
+
+export interface OptimizedLookupResult {
+    cacheKey: string;
+    value: string | null;
+    lockAcquired: boolean;
+}
+
+export interface OptimizedRedisPrimitives {
+    lookupVersioned(input: OptimizedLookupInput): Promise<OptimizedLookupResult>;
+    populateAndRelease(input: {
+        cacheKey: string;
+        lockToken: string;
+        value: string;
+        ttlSeconds: number;
+    }): Promise<boolean>;
+    bumpTagVersions(keys: string[], ttlSeconds: number): Promise<number[]>;
+}
+
 /**
  * Redis adapter interface for cache operations
  *
@@ -70,6 +94,8 @@ export interface RedisAdapter {
     setIfNotExists?(key: string, value: string, ttlMs: number): Promise<boolean>;
     /** Atomically delete a key only when its current string value matches */
     deleteIfValue?(key: string, value: string): Promise<boolean>;
+    /** Optional standalone Redis scripts for atomic multi-key cache operations. */
+    optimized?: OptimizedRedisPrimitives;
 }
 
 export interface CacheStampedeOptions {
@@ -165,12 +191,19 @@ export interface CacheEvent {
     model: string;
     operation: string;
     result: 'hit' | 'miss' | 'bypass';
-    path: 'fallback' | 'bypass';
+    path: 'optimized' | 'fallback' | 'bypass';
     reason?: string;
 }
 
 export interface Metrics {
     onCacheEvent(event: CacheEvent): void;
+    onScriptEvent?(event: CacheScriptEvent): void;
+}
+
+export interface CacheScriptEvent {
+    primitive: 'lookupVersioned' | 'populateAndRelease' | 'bumpTagVersions';
+    result: 'reload' | 'failure';
+    retry: boolean;
 }
 
 /**
@@ -256,7 +289,7 @@ export interface CacheTagsConfig {
     entityKeys?: string[];
     /** Structured logger. Default: no-op. */
     logger?: Logger;
-    /** Metrics sink for cache hit, miss, and bypass events with path/reason observability. Default: no-op. */
+    /** Metrics sink for cache and optimized-script events. Default: no-op. */
     metrics?: Metrics;
 }
 

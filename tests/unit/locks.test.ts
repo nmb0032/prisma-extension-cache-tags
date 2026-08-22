@@ -31,6 +31,11 @@ beforeEach(() => {
 });
 
 describe('cache locks', () => {
+    test('derives the lock key directly from the versioned cache key', async () => {
+        const lock = await acquireCacheLock('key-1', undefined, config, redis);
+        expect(lock?.key).toBe('key-1:lock');
+    });
+
     test('the first caller acquires and the second is refused', async () => {
         const first = await acquireCacheLock('key-1', undefined, config, redis);
         const second = await acquireCacheLock('key-1', undefined, config, redis);
@@ -54,7 +59,7 @@ describe('cache locks', () => {
 
         await releaseCacheLock({ key: lock!.key, token: 'someone-elses-token' }, redis, config);
 
-        expect(redis.store.has(getCacheLockKey('key-1', config))).toBe(true);
+        expect(redis.store.has(getCacheLockKey('key-1'))).toBe(true);
     });
 
     test('does not release a lock when conditional deletion is unavailable', async () => {
@@ -100,6 +105,36 @@ describe('cache locks', () => {
 
         const result = await waitForCachedValue('key-1', undefined, config, redis, async () => value);
         expect(result).toBe('populated');
+    });
+
+    test('checks immediately when the value is already available', async () => {
+        vi.useFakeTimers();
+        try {
+            const getCachedValue = vi.fn().mockResolvedValue('already-cached');
+            await expect(waitForCachedValue('key-1', undefined, config, redis, getCachedValue)).resolves.toBe('already-cached');
+            expect(getCachedValue).toHaveBeenCalledTimes(1);
+            expect(vi.getTimerCount()).toBe(0);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    test('uses bounded exponential backoff instead of waiting for the default poll interval', async () => {
+        vi.useFakeTimers();
+        try {
+            let calls = 0;
+            const getCachedValue = vi.fn().mockImplementation(async () => {
+                calls += 1;
+                return calls >= 3 ? 'populated' : undefined;
+            });
+            const pending = waitForCachedValue('key-1', undefined, config, redis, getCachedValue);
+            await vi.advanceTimersByTimeAsync(2);
+            await vi.advanceTimersByTimeAsync(4);
+            await expect(pending).resolves.toBe('populated');
+            expect(getCachedValue).toHaveBeenCalledTimes(3);
+        } finally {
+            vi.useRealTimers();
+        }
     });
 
     test('waitForCachedValue gives up after waitMs', async () => {

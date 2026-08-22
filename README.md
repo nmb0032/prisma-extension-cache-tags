@@ -93,9 +93,24 @@ Values are stored as one flat SuperJSON string:
 { identity, tenantScope, value }
 ```
 
-Every fallback hit deserializes and verifies both identity and sorted tenant
-scope before returning `value`. A mismatch is deleted when possible, reported
-as a cache bypass, and never returned. v1 keys are not read or migrated.
+Every cache hit, including the optimized path, deserializes and verifies both
+identity and sorted tenant scope before returning `value`. A mismatch is
+deleted when possible, reported as a cache bypass, and never returned. v1 keys
+are not read or migrated.
+
+The built-in node-redis and ioredis adapters use standalone/Sentinel-safe Lua
+primitives by default when their script commands are available. A versioned
+lookup, owner population/release, and multi-tag invalidation each execute
+atomically. Pass `{ optimized: false }` to either adapter factory, or omit the
+optional primitives on a custom adapter, to use the equivalent command
+fallback. Cluster clients must use the fallback because a multi-key script
+cannot span Redis hash slots.
+
+Lua results are treated as untrusted wire data. The extension deserializes and
+verifies every returned envelope against the prepared canonical identity and
+sorted tenant scope before reporting or serving a hit. Script loads use
+`EVALSHA`, with one `NOSCRIPT` reload/retry; failures are logged and surfaced
+through the optional `metrics.onScriptEvent` hook before the safe fallback runs.
 
 ## Requirements
 
@@ -110,6 +125,7 @@ as a cache bypass, and never returned. v1 keys are not read or migrated.
 - Cross-model `dependencyTags`
 - Transaction-deferred flush
 - Distributed single-flight lock
+- Atomic standalone Redis fast path (with command fallback)
 - Superjson serialization (Date/Decimal/BigInt safe)
 
 ## Comparison and limits
@@ -166,12 +182,15 @@ informational only, not statistical claims or CI thresholds; correctness
 failures remain fatal.
 
 The invalidation benchmark reports p50 and p99 invalidation latency by keyspace
-and verifies the expected Redis `INCRBY` count. The blended model-backed report
+and verifies one Redis `EVALSHA` per optimized invalidation (or `INCRBY` in
+forced fallback mode). The blended model-backed report
 continues to include throughput, p50/p95/p99 latency, cache hit rate, database
 query count, errors, and freshness failures. The preceding comparison has its
 own rows and counters, so its read-only measurements do not alter the mixed
-workload report. Redis command counts and Node event-loop utilization are not
-yet instrumented for the model-backed phases.
+workload report. A focused Redis `INFO commandstats` probe can isolate warm
+lookup, cold-owner, and multi-tag invalidation command deltas; `INFO` counters
+are process-wide, so reset and run each probe without concurrent traffic.
+Node event-loop utilization is not instrumented.
 
 The model-backed benchmark normally removes only the current run's database rows
 and Redis namespace, and never flushes the Redis database. Pass `--preserve` to

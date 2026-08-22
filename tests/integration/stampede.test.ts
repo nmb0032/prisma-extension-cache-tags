@@ -9,17 +9,27 @@ import { createCachedClient, createQueryCounter, createRedis } from './helpers';
 const redis = await createRedis();
 const counterA = createQueryCounter();
 const counterB = createQueryCounter();
+const fallbackCounterA = createQueryCounter();
+const fallbackCounterB = createQueryCounter();
 
 // Two separate extended clients = two separate processes, as far as any
 // in-process coalescing map is concerned.
 const podA = createCachedClient(redis, counterA);
 const podB = createCachedClient(redis, counterB);
+const fallbackPodA = createCachedClient(redis, fallbackCounterA, {}, {}, createNodeRedisAdapter(redis, { optimized: false }));
+const fallbackPodB = createCachedClient(redis, fallbackCounterB, {}, {}, createNodeRedisAdapter(redis, { optimized: false }));
 
 afterAll(async () => {
     try {
         await redis.flushDb();
     } finally {
-        await Promise.allSettled([redis.quit(), podA.$disconnect(), podB.$disconnect()]);
+        await Promise.allSettled([
+            redis.quit(),
+            podA.$disconnect(),
+            podB.$disconnect(),
+            fallbackPodA.$disconnect(),
+            fallbackPodB.$disconnect(),
+        ]);
     }
 });
 
@@ -28,6 +38,8 @@ beforeEach(async () => {
     await podA.widget.deleteMany();
     counterA.reset();
     counterB.reset();
+    fallbackCounterA.reset();
+    fallbackCounterB.reset();
 });
 
 describe('distributed stampede protection', () => {
@@ -74,5 +86,19 @@ describe('distributed stampede protection', () => {
         } finally {
             await releaseCacheLock(ownerLock!, redisAdapter, config);
         }
+    });
+
+    test('the command fallback preserves one-owner stampede protection', async () => {
+        await fallbackPodA.widget.create({ data: { tenantId: 't1', name: 'w1' } });
+        fallbackCounterA.reset();
+        fallbackCounterB.reset();
+
+        const [resultA, resultB] = await Promise.all([
+            fallbackPodA.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } }),
+            fallbackPodB.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } }),
+        ]);
+
+        expect(resultA).toEqual(resultB);
+        expect((fallbackCounterA.byModel.Widget ?? 0) + (fallbackCounterB.byModel.Widget ?? 0)).toBe(1);
     });
 });

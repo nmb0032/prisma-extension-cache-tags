@@ -38,4 +38,52 @@ describe('node-redis adapter', () => {
         expect(await adapter.increment('counter', 4)).toBe(4);
         expect(await adapter.mgetString(['a', 'b'])).toEqual(['1', null]);
     });
+
+    test('exposes optimized script primitives by default when script commands are available', () => {
+        const client: NodeRedisClientLike = {
+            get: vi.fn(),
+            set: vi.fn(),
+            del: vi.fn(),
+            incrBy: vi.fn(),
+            expire: vi.fn(),
+            mGet: vi.fn(),
+            eval: vi.fn(),
+            scriptLoad: vi.fn().mockResolvedValue('sha'),
+            evalSha: vi.fn(),
+        };
+
+        expect(createNodeRedisAdapter(client).optimized).toBeDefined();
+        expect(createNodeRedisAdapter(client, { optimized: false }).optimized).toBeUndefined();
+    });
+
+    test('retains fallback semantics when script commands are unavailable', () => {
+        const client: NodeRedisClientLike = {
+            get: vi.fn(),
+            set: vi.fn(),
+            del: vi.fn(),
+            incrBy: vi.fn(),
+            expire: vi.fn(),
+            mGet: vi.fn(),
+            eval: vi.fn(),
+        };
+
+        expect(createNodeRedisAdapter(client).optimized).toBeUndefined();
+    });
+
+    test('does not expose multi-key scripts for cluster clients', () => {
+        const client: NodeRedisClientLike = {
+            isCluster: true,
+            get: vi.fn(),
+            set: vi.fn(),
+            del: vi.fn(),
+            incrBy: vi.fn(),
+            expire: vi.fn(),
+            mGet: vi.fn(),
+            eval: vi.fn(),
+            scriptLoad: vi.fn(),
+            evalSha: vi.fn(),
+        };
+
+        expect(createNodeRedisAdapter(client).optimized).toBeUndefined();
+    });
 });

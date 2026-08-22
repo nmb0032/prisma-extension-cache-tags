@@ -1,7 +1,9 @@
 import type { RedisAdapter } from '../types';
+import { createOptimizedRedisPrimitives } from '../optimized';
 
 /** Structural type for the `redis` (node-redis) client. Avoids a runtime import. */
 export interface NodeRedisClientLike {
+    isCluster?: boolean;
     get(key: string): Promise<string | null>;
     set(key: string, value: string, options?: { EX?: number; NX?: boolean; PX?: number }): Promise<string | null>;
     del(key: string): Promise<number>;
@@ -9,6 +11,8 @@ export interface NodeRedisClientLike {
     expire(key: string, seconds: number): Promise<boolean | number>;
     mGet(keys: string[]): Promise<Array<string | null>>;
     eval(script: string, options: { keys: string[]; arguments: string[] }): Promise<unknown>;
+    scriptLoad?(script: string): Promise<string>;
+    evalSha?(sha: string, options: { keys: string[]; arguments: string[] }): Promise<unknown>;
 }
 
 const RELEASE_IF_VALUE = `
@@ -18,8 +22,17 @@ else
   return 0
 end`;
 
-export function createNodeRedisAdapter(client: NodeRedisClientLike): RedisAdapter {
-    return {
+export interface NodeRedisAdapterOptions {
+    optimized?: boolean;
+}
+
+function isClusterClient(client: NodeRedisClientLike): boolean {
+    const constructorName = (client as { constructor?: { name?: string } }).constructor?.name;
+    return Boolean(client.isCluster) || constructorName === 'RedisCluster' || constructorName === 'Cluster';
+}
+
+export function createNodeRedisAdapter(client: NodeRedisClientLike, options: NodeRedisAdapterOptions = {}): RedisAdapter {
+    const adapter: RedisAdapter = {
         async getString(key: string): Promise<string | null> {
             return client.get(key);
         },
@@ -47,4 +60,13 @@ export function createNodeRedisAdapter(client: NodeRedisClientLike): RedisAdapte
             return Number(deleted) === 1;
         },
     };
+
+    if (options.optimized !== false && !isClusterClient(client) && client.scriptLoad && client.evalSha) {
+        adapter.optimized = createOptimizedRedisPrimitives({
+            load: (source) => client.scriptLoad!(source),
+            evalSha: (sha, keys, args) => client.evalSha!(sha, { keys, arguments: args }),
+        });
+    }
+
+    return adapter;
 }

@@ -22,7 +22,7 @@ The extension uses the defaults below when a field is omitted.
 | `tenantPrecision` | `boolean` | `false` | Opts into tenant-precise reads when every cached read and write is guaranteed to include one of `tenantKeys`; otherwise the safe model-level default is recommended. |
 | `entityKeys` | `string[]` | `['id']` | Prisma argument property names that identify individual records. |
 | `logger` | `Logger` | No-op logger | Receives structured debug, warning, and error events emitted by the extension. The `info` method is part of the interface but is not currently emitted by core operations. |
-| `metrics` | `Metrics` | No-op metrics sink | Receives hit, miss, and bypass events through `onCacheEvent`, with `path` set to `'fallback'` or `'bypass'`. |
+| `metrics` | `Metrics` | No-op metrics sink | Receives hit, miss, and bypass events through `onCacheEvent`, with `path` set to `'optimized'`, `'fallback'`, or `'bypass'`. Optional `onScriptEvent` reports script reloads and terminal failures. |
 
 ### Tenant keys
 
@@ -37,6 +37,15 @@ const config: CacheTagsConfig = {
     tenantKeys: ['organizationId', 'accountId'],
 };
 ```
+
+The built-in node-redis and ioredis adapters expose atomic optimized
+primitives by default for standalone and Sentinel deployments. Set
+`createNodeRedisAdapter(client, { optimized: false })` or
+`createIoRedisAdapter(client, { optimized: false })` to force command fallback.
+Cluster clients and custom adapters without `optimized` use the fallback
+automatically. The optimized lookup and population scripts derive the direct
+`<versioned-cache-key>:lock` key, so fallback and Lua lock ownership remain
+compatible.
 
 For writes, tenant values are inferred from the Prisma arguments and, when
 available, the successful returned record. This means an update or delete such
@@ -154,9 +163,10 @@ const config: CacheTagsConfig = {
 ### Metrics
 
 The metrics sink receives `{ model, operation, result, path, reason? }`. `result`
-is `'hit'`, `'miss'`, or `'bypass'`; fallback cache operations use
-`path: 'fallback'`, and permanent canonicalization bypasses use
-`path: 'bypass'`. Identity mismatches include `reason: 'identity-mismatch'`.
+is `'hit'`, `'miss'`, or `'bypass'`; optimized operations use
+`path: 'optimized'`, command operations use `path: 'fallback'`, and permanent
+canonicalization bypasses use `path: 'bypass'`. Identity mismatches include
+`reason: 'identity-mismatch'`.
 
 ```ts
 import type { CacheTagsConfig } from 'prisma-extension-cache-tags';
@@ -169,6 +179,10 @@ const config: CacheTagsConfig = {
     },
 };
 ```
+
+When supplied, `onScriptEvent` receives
+`{ primitive, result: 'reload' | 'failure', retry }`. Script failures include
+the primitive, retry state, and original error in the structured logger entry.
 
 ## `CacheStampedeOptions`
 

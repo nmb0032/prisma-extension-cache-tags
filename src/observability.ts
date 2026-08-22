@@ -9,4 +9,5 @@ export const noopLogger: Logger = {
 
 export const noopMetrics: Metrics = {
     onCacheEvent: () => undefined,
+    onScriptEvent: () => undefined,
 };

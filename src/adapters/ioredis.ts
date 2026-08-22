@@ -1,7 +1,9 @@
 import type { RedisAdapter } from '../types';
+import { createOptimizedRedisPrimitives } from '../optimized';
 
 /** Structural type for the `ioredis` client. Avoids a runtime import. */
 export interface IoRedisClientLike {
+    isCluster?: boolean;
     get(key: string): Promise<string | null>;
     set(key: string, value: string): Promise<unknown>;
     set(key: string, value: string, mode: 'EX', ttlSeconds: number): Promise<unknown>;
@@ -11,6 +13,8 @@ export interface IoRedisClientLike {
     expire(key: string, seconds: number): Promise<number>;
     mget(keys: string[]): Promise<Array<string | null>>;
     eval(script: string, numKeys: number, ...args: string[]): Promise<unknown>;
+    script?(...args: any[]): Promise<unknown>;
+    evalsha?(...args: any[]): Promise<unknown>;
 }
 
 const RELEASE_IF_VALUE = `
@@ -20,8 +24,17 @@ else
   return 0
 end`;
 
-export function createIoRedisAdapter(client: IoRedisClientLike): RedisAdapter {
-    return {
+export interface IoRedisAdapterOptions {
+    optimized?: boolean;
+}
+
+function isClusterClient(client: IoRedisClientLike): boolean {
+    const constructorName = (client as { constructor?: { name?: string } }).constructor?.name;
+    return Boolean(client.isCluster) || constructorName === 'Cluster' || constructorName === 'RedisCluster';
+}
+
+export function createIoRedisAdapter(client: IoRedisClientLike, options: IoRedisAdapterOptions = {}): RedisAdapter {
+    const adapter: RedisAdapter = {
         async getString(key: string): Promise<string | null> {
             return client.get(key);
         },
@@ -53,4 +66,13 @@ export function createIoRedisAdapter(client: IoRedisClientLike): RedisAdapter {
             return Number(deleted) === 1;
         },
     };
+
+    if (options.optimized !== false && !isClusterClient(client) && client.script && client.evalsha) {
+        adapter.optimized = createOptimizedRedisPrimitives({
+            load: async (source) => String(await client.script!('LOAD', source)),
+            evalSha: (sha, keys, args) => client.evalsha!(sha, keys.length, ...keys, ...args),
+        });
+    }
+
+    return adapter;
 }

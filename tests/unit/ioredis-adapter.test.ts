@@ -38,4 +38,38 @@ describe('ioredis adapter', () => {
         expect(await adapter.increment('counter', 4)).toBe(4);
         expect(await adapter.mgetString(['a', 'b'])).toEqual(['1', null]);
     });
+
+    test('exposes optimized script primitives by default and supports explicit fallback mode', () => {
+        const client: IoRedisClientLike = {
+            get: vi.fn(),
+            set: vi.fn(),
+            del: vi.fn(),
+            incrby: vi.fn(),
+            expire: vi.fn(),
+            mget: vi.fn(),
+            eval: vi.fn(),
+            script: vi.fn().mockResolvedValue('sha'),
+            evalsha: vi.fn(),
+        };
+
+        expect(createIoRedisAdapter(client).optimized).toBeDefined();
+        expect(createIoRedisAdapter(client, { optimized: false }).optimized).toBeUndefined();
+    });
+
+    test('does not expose multi-key scripts for cluster clients', () => {
+        const client: IoRedisClientLike = {
+            isCluster: true,
+            get: vi.fn(),
+            set: vi.fn(),
+            del: vi.fn(),
+            incrby: vi.fn(),
+            expire: vi.fn(),
+            mget: vi.fn(),
+            eval: vi.fn(),
+            script: vi.fn(),
+            evalsha: vi.fn(),
+        };
+
+        expect(createIoRedisAdapter(client).optimized).toBeUndefined();
+    });
 });

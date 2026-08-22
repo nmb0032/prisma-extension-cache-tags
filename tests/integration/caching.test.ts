@@ -1,13 +1,16 @@
+import IoRedis from 'ioredis';
 import { afterAll, beforeEach, describe, expect, test, vi } from 'vitest';
+import { createIoRedisAdapter } from '../../src/adapters/ioredis';
 import { createNodeRedisAdapter } from '../../src/adapters/node-redis';
 import { normalizeConfig } from '../../src/config';
 import { readThroughCache } from '../../src/extension';
 import { buildVersionedCacheKey, createVersionToken, prepareCacheKey } from '../../src/keys';
 import { resolveCacheTags } from '../../src/tags';
 import { serializeCacheEnvelope } from '../../src/serialization';
-import { createCachedClient, createQueryCounter, createRedis } from './helpers';
+import { REDIS_URL, createCachedClient, createQueryCounter, createRedis } from './helpers';
 
 const redis = await createRedis();
+const ioRedis = new IoRedis(REDIS_URL);
 const counter = createQueryCounter();
 const prisma = createCachedClient(redis, counter);
 const dependentClients: Array<{ $disconnect(): Promise<void> }> = [];
@@ -16,6 +19,7 @@ afterAll(async () => {
     try {
         await redis.flushDb();
     } finally {
+        ioRedis.disconnect();
         await Promise.allSettled([redis.quit(), prisma.$disconnect(), ...dependentClients.map((client) => client.$disconnect())]);
     }
 });
@@ -28,6 +32,57 @@ beforeEach(async () => {
 });
 
 describe('read-through caching', () => {
+    test('keeps optimized, fallback, and minimal custom adapters behaviorally identical', async () => {
+        const modes = [
+            {
+                name: 'node-redis optimized',
+                adapter: createNodeRedisAdapter(redis),
+            },
+            {
+                name: 'node-redis fallback',
+                adapter: createNodeRedisAdapter(redis, { optimized: false }),
+            },
+            {
+                name: 'custom fallback',
+                adapter: {
+                    ...createNodeRedisAdapter(redis, { optimized: false }),
+                },
+            },
+            {
+                name: 'ioredis optimized',
+                adapter: createIoRedisAdapter(ioRedis),
+            },
+            {
+                name: 'ioredis fallback',
+                adapter: createIoRedisAdapter(ioRedis, { optimized: false }),
+            },
+        ] as const;
+        const observations: Array<{ name: string; first: unknown; second: unknown; reads: number }> = [];
+        const clients: Array<{ $disconnect(): Promise<void> }> = [];
+
+        try {
+            for (const mode of modes) {
+                await redis.flushDb();
+                await prisma.widget.deleteMany();
+                const modeCounter = createQueryCounter();
+                const client = createCachedClient(redis, modeCounter, {}, {}, mode.adapter);
+                clients.push(client);
+                await client.widget.create({ data: { tenantId: 'parity', name: mode.name } });
+                modeCounter.reset();
+
+                const first = await client.widget.findMany({ where: { tenantId: 'parity' }, cache: { ttlSeconds: 60 } });
+                const second = await client.widget.findMany({ where: { tenantId: 'parity' }, cache: { ttlSeconds: 60 } });
+                observations.push({ name: mode.name, first, second, reads: modeCounter.byModel.Widget ?? 0 });
+            }
+        } finally {
+            await Promise.all(clients.map((client) => client.$disconnect()));
+        }
+
+        expect(observations).toHaveLength(5);
+        expect(observations.map(({ first }) => first)).toEqual(observations.map(({ second }) => second));
+        expect(observations.map(({ reads }) => reads)).toEqual([1, 1, 1, 1, 1]);
+    });
+
     test('an uncached read hits the database every time', async () => {
         await prisma.widget.create({ data: { tenantId: 't1', name: 'w1' } });
         counter.reset();
@@ -187,7 +242,7 @@ describe('read-through caching', () => {
             model: 'Widget',
             operation: 'findMany',
             result: 'bypass',
-            path: 'fallback',
+            path: 'optimized',
             reason: 'invalid-envelope',
         });
         expect(onCacheEvent).not.toHaveBeenCalledWith(expect.objectContaining({ result: 'hit' }));

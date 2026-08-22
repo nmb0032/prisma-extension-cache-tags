@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { normalizeConfig } from './config';
 import { getTagVersionKey } from './keys';
+import { observeOptimizedScripts } from './optimized';
 import type { CacheTagsConfig, NormalizedCacheConfig, RedisAdapter } from './types';
 
 type InvalidationContext = {
@@ -8,6 +9,10 @@ type InvalidationContext = {
 };
 
 const invalidationStorage = new AsyncLocalStorage<InvalidationContext>();
+
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
 
 export function getActiveInvalidationContext(): InvalidationContext | undefined {
     return invalidationStorage.getStore();
@@ -30,6 +35,41 @@ export async function bumpTagVersions(tags: string[], config: NormalizedCacheCon
 
     const versionTtlSeconds = Math.max(config.maxTtlSeconds * 10, 3600);
     const uniqueTags = Array.from(new Set(tags));
+    const optimized = redisAdapter.optimized;
+
+    if (optimized) {
+        const observation = observeOptimizedScripts(optimized, config.metrics);
+        try {
+            const versions = await optimized.bumpTagVersions(
+                uniqueTags.map((tag) => getTagVersionKey(tag, config)),
+                versionTtlSeconds,
+            );
+            if (versions.length !== uniqueTags.length) {
+                throw new Error('Optimized invalidation returned an unexpected version count');
+            }
+            uniqueTags.forEach((tag, index) => {
+                const version = versions[index]!;
+                config.logger.debug(
+                    { tag, key: getTagVersionKey(tag, config), version, ttl: versionTtlSeconds },
+                    'Bumped cache tag version',
+                );
+            });
+            return;
+        } catch (error) {
+            const failure = observation.failureDetails();
+            config.logger.warn(
+                {
+                    primitive: 'bumpTagVersions',
+                    retry: failure?.retry ?? false,
+                    error: errorMessage(failure?.error ?? error),
+                    originalError: failure?.error ?? error,
+                },
+                'Optimized invalidation failed; using command fallback',
+            );
+        } finally {
+            observation.unregister();
+        }
+    }
 
     await Promise.all(
         uniqueTags.map(async (tag) => {

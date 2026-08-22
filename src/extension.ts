@@ -6,12 +6,14 @@
  * query shape plus tag version tokens, so invalidation does not require Redis
  * key scans.
  */
+import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client/extension';
 import { CanonicalizationError } from './canonical';
 import { normalizeConfig } from './config';
 import { bumpTagVersions, publishInvalidation, runWithInvalidationContext } from './invalidation';
-import { buildVersionedCacheKey, createVersionToken, prepareCacheKey } from './keys';
-import { acquireCacheLock, releaseCacheLock, waitForCachedValue } from './locks';
+import { buildVersionedCacheKey, createVersionToken, getCacheLockKey, prepareCacheKey } from './keys';
+import { acquireCacheLock, releaseCacheLock, resolveStampedeOptions, waitForCachedValue } from './locks';
+import { observeOptimizedScripts } from './optimized';
 import { deserializeCacheEnvelope, InvalidCacheEnvelopeError, matchesCacheIdentity, serializeCacheEnvelope } from './serialization';
 import { resolveCacheTags } from './tags';
 import {
@@ -95,20 +97,17 @@ function prepareRead(
     };
 }
 
-async function tryGetCachedValue(
+async function validateCachedPayload(
     model: string,
     operation: string,
     cacheKey: string,
+    payload: string,
     prepared: PreparedRead,
     redisAdapter: RedisAdapter,
     config: NormalizedCacheConfig,
+    path: 'optimized' | 'fallback',
     onBypass: (reason: 'identity-mismatch' | 'invalid-envelope') => void,
 ): Promise<CachedHit | undefined> {
-    const payload = await redisAdapter.getString(cacheKey);
-    if (payload === null) {
-        return undefined;
-    }
-
     let cached: ReturnType<typeof deserializeCacheEnvelope>;
     try {
         cached = deserializeCacheEnvelope(payload);
@@ -139,7 +138,7 @@ async function tryGetCachedValue(
             model,
             operation,
             result: 'bypass',
-            path: 'fallback',
+            path,
             reason: 'invalid-envelope',
         });
         return undefined;
@@ -176,7 +175,7 @@ async function tryGetCachedValue(
             model,
             operation,
             result: 'bypass',
-            path: 'fallback',
+            path,
             reason: 'identity-mismatch',
         });
         return undefined;
@@ -185,7 +184,25 @@ async function tryGetCachedValue(
     return { value: cached.value };
 }
 
-export async function readThroughCache(params: {
+async function tryGetCachedValue(
+    model: string,
+    operation: string,
+    cacheKey: string,
+    prepared: PreparedRead,
+    redisAdapter: RedisAdapter,
+    config: NormalizedCacheConfig,
+    path: 'optimized' | 'fallback',
+    onBypass: (reason: 'identity-mismatch' | 'invalid-envelope') => void,
+): Promise<CachedHit | undefined> {
+    const payload = await redisAdapter.getString(cacheKey);
+    if (payload === null) {
+        return undefined;
+    }
+
+    return validateCachedPayload(model, operation, cacheKey, payload, prepared, redisAdapter, config, path, onBypass);
+}
+
+interface ReadThroughParams {
     model: string;
     operation: string;
     args: unknown;
@@ -195,27 +212,42 @@ export async function readThroughCache(params: {
     cacheOptions: CacheReadOptions;
     config: NormalizedCacheConfig;
     redisAdapter: RedisAdapter;
-}): Promise<unknown> {
-    const { model, operation, args, cleanedArgs, query, cacheOptions, config, redisAdapter } = params;
-    const ttlSeconds = normalizeTtl(cacheOptions, config);
-    const preparedRead = params.preparedRead ?? prepareRead(model, operation, cleanedArgs, args, cacheOptions, config);
+}
+
+type CacheBypassReason = 'identity-mismatch' | 'invalid-envelope';
+
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+}
+
+function logScriptFailure(
+    config: NormalizedCacheConfig,
+    primitive: 'lookupVersioned' | 'populateAndRelease' | 'bumpTagVersions',
+    error: unknown,
+    retry = false,
+): void {
+    config.logger.warn(
+        { primitive, retry, error: errorMessage(error), originalError: error },
+        'Redis cache script failed',
+    );
+}
+
+async function readThroughFallback(params: ReadThroughParams, preparedRead: PreparedRead, ttlSeconds: number): Promise<unknown> {
+    const { model, operation, cleanedArgs, query, cacheOptions, config, redisAdapter } = params;
     let cacheKey: string;
-    let bypassReason: 'identity-mismatch' | 'invalid-envelope' | undefined;
+    let bypassReason: CacheBypassReason | undefined;
 
     try {
         const versions = await redisAdapter.mgetString(preparedRead.preparedKey.tagVersionKeys);
         cacheKey = buildVersionedCacheKey(preparedRead.preparedKey.baseKey, createVersionToken(versions));
     } catch (error) {
-        config.logger.warn(
-            { model, operation, error: error instanceof Error ? error.message : String(error) },
-            'Cache read failed; falling back to Prisma query',
-        );
+        config.logger.warn({ model, operation, error: errorMessage(error) }, 'Cache read failed; falling back to Prisma query');
         config.metrics.onCacheEvent({ model, operation, result: 'miss', path: 'fallback' });
         return query(cleanedArgs);
     }
 
     const getCachedValue = () =>
-        tryGetCachedValue(model, operation, cacheKey, preparedRead, redisAdapter, config, (reason) => {
+        tryGetCachedValue(model, operation, cacheKey, preparedRead, redisAdapter, config, 'fallback', (reason) => {
             bypassReason ??= reason;
         });
 
@@ -229,10 +261,7 @@ export async function readThroughCache(params: {
             return cachedValue.value;
         }
     } catch (error) {
-        config.logger.warn(
-            { model, operation, cacheKey, error: error instanceof Error ? error.message : String(error) },
-            'Cache read failed; falling back to Prisma query',
-        );
+        config.logger.warn({ model, operation, cacheKey, error: errorMessage(error) }, 'Cache read failed; falling back to Prisma query');
     }
 
     if (!bypassReason) {
@@ -242,7 +271,7 @@ export async function readThroughCache(params: {
         config.metrics.onCacheEvent({ model, operation, result: 'miss', path: 'fallback' });
     }
 
-    if (bypassReason === 'invalid-envelope') {
+    if (bypassReason) {
         return query(cleanedArgs);
     }
 
@@ -253,7 +282,14 @@ export async function readThroughCache(params: {
             try {
                 lock = await acquireCacheLock(cacheKey, cacheOptions, config, redisAdapter);
                 if (!lock) {
-                    const waitedValue = await waitForCachedValue(cacheKey, cacheOptions, config, redisAdapter, getCachedValue);
+                    const waitedValue = await waitForCachedValue(
+                        cacheKey,
+                        cacheOptions,
+                        config,
+                        redisAdapter,
+                        getCachedValue,
+                        () => bypassReason !== undefined,
+                    );
                     if (waitedValue !== undefined) {
                         config.metrics.onCacheEvent({ model, operation, result: 'hit', path: 'fallback' });
                         return waitedValue.value;
@@ -268,7 +304,7 @@ export async function readThroughCache(params: {
                 }
             } catch (error) {
                 config.logger.warn(
-                    { model, operation, cacheKey, error: error instanceof Error ? error.message : String(error) },
+                    { model, operation, cacheKey, error: errorMessage(error) },
                     'Cache lock handling failed; falling back to Prisma query',
                 );
             }
@@ -295,7 +331,7 @@ export async function readThroughCache(params: {
                 }
             } catch (error) {
                 config.logger.warn(
-                    { model, operation, cacheKey, error: error instanceof Error ? error.message : String(error) },
+                    { model, operation, cacheKey, error: errorMessage(error) },
                     'Cache write failed; continuing without cache',
                 );
             }
@@ -307,6 +343,153 @@ export async function readThroughCache(params: {
             await releaseCacheLock(lock, redisAdapter, config);
         }
     }
+}
+
+async function readThroughOptimized(params: ReadThroughParams, preparedRead: PreparedRead, ttlSeconds: number): Promise<unknown> {
+    const { model, operation, cleanedArgs, query, cacheOptions, config, redisAdapter } = params;
+    const optimized = redisAdapter.optimized!;
+    const observation = observeOptimizedScripts(optimized, config.metrics);
+    let bypassReason: CacheBypassReason | undefined;
+    const { lockTtlMs } = resolveStampedeOptions(cacheOptions, config);
+    const lockToken = randomUUID();
+
+    try {
+        let lookup: { cacheKey: string; value: string | null; lockAcquired: boolean };
+        try {
+            lookup = await optimized.lookupVersioned({
+                baseKey: preparedRead.preparedKey.baseKey,
+                tagVersionKeys: preparedRead.preparedKey.tagVersionKeys,
+                lockToken,
+                lockTtlMs,
+            });
+        } catch (error) {
+            const failure = observation.failureDetails();
+            logScriptFailure(config, 'lookupVersioned', failure?.error ?? error, failure?.retry ?? false);
+            return readThroughFallback(params, preparedRead, ttlSeconds);
+        }
+
+        const getCachedValue = () =>
+            tryGetCachedValue(
+                model,
+                operation,
+                lookup.cacheKey,
+                preparedRead,
+                redisAdapter,
+                config,
+                'optimized',
+                (reason) => {
+                    bypassReason ??= reason;
+                },
+            );
+
+        if (lookup.value !== null) {
+            const cachedValue = await validateCachedPayload(
+                model,
+                operation,
+                lookup.cacheKey,
+                lookup.value,
+                preparedRead,
+                redisAdapter,
+                config,
+                'optimized',
+                (reason) => {
+                    bypassReason ??= reason;
+                },
+            );
+            if (cachedValue !== undefined) {
+                if (cacheOptions.debug) {
+                    config.logger.debug(
+                        { model, operation, cacheKey: lookup.cacheKey, tags: preparedRead.normalizedTags },
+                        'Cache hit',
+                    );
+                }
+                config.metrics.onCacheEvent({ model, operation, result: 'hit', path: 'optimized' });
+                return cachedValue.value;
+            }
+            return query(cleanedArgs);
+        }
+
+        if (!bypassReason) {
+            if (cacheOptions.debug) {
+                config.logger.debug(
+                    { model, operation, cacheKey: lookup.cacheKey, tags: preparedRead.normalizedTags },
+                    'Cache miss',
+                );
+            }
+            config.metrics.onCacheEvent({ model, operation, result: 'miss', path: 'optimized' });
+        }
+
+        if (!lookup.lockAcquired) {
+            let waitedValue: CachedHit | undefined;
+            try {
+                waitedValue = await waitForCachedValue(
+                    lookup.cacheKey,
+                    cacheOptions,
+                    config,
+                    redisAdapter,
+                    getCachedValue,
+                    () => bypassReason !== undefined,
+                );
+            } catch (error) {
+                config.logger.warn(
+                    { model, operation, cacheKey: lookup.cacheKey, error: errorMessage(error) },
+                    'Cache waiter read failed; falling back to Prisma query',
+                );
+            }
+            if (waitedValue !== undefined) {
+                config.metrics.onCacheEvent({ model, operation, result: 'hit', path: 'optimized' });
+                return waitedValue.value;
+            }
+            return query(cleanedArgs);
+        }
+
+        let populated = false;
+        try {
+            const result = await query(cleanedArgs);
+            if (!bypassReason && shouldCacheResult(result, config)) {
+                try {
+                    populated = await optimized.populateAndRelease({
+                        cacheKey: lookup.cacheKey,
+                        lockToken,
+                        value: serializeCacheEnvelope({
+                            identity: preparedRead.preparedKey.identity,
+                            tenantScope: preparedRead.tenantScope,
+                            value: result,
+                        }),
+                        ttlSeconds,
+                    });
+                    if (populated && cacheOptions.debug) {
+                        config.logger.debug(
+                            { model, operation, cacheKey: lookup.cacheKey, ttlSeconds, tags: preparedRead.normalizedTags },
+                            'Cached query result',
+                        );
+                    }
+                } catch (error) {
+                    const failure = observation.failureDetails();
+                    logScriptFailure(config, 'populateAndRelease', failure?.error ?? error, failure?.retry ?? false);
+                }
+            }
+            return result;
+        } finally {
+            if (!populated) {
+                await releaseCacheLock({ key: getCacheLockKey(lookup.cacheKey), token: lockToken }, redisAdapter, config);
+            }
+        }
+    } finally {
+        observation.unregister();
+    }
+}
+
+export async function readThroughCache(params: ReadThroughParams): Promise<unknown> {
+    const { model, operation, args, cleanedArgs, cacheOptions, config, redisAdapter } = params;
+    const ttlSeconds = normalizeTtl(cacheOptions, config);
+    const preparedRead = params.preparedRead ?? prepareRead(model, operation, cleanedArgs, args, cacheOptions, config);
+
+    if (redisAdapter.optimized) {
+        return readThroughOptimized(params, preparedRead, ttlSeconds);
+    }
+
+    return readThroughFallback(params, preparedRead, ttlSeconds);
 }
 
 export async function handleWrite(params: {

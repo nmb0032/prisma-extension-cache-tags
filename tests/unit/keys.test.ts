@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { buildVersionedCacheKey, createVersionToken, getTagVersionKey, prepareCacheKey } from '../../src/keys';
+import { buildVersionedCacheKey, createVersionToken, getCacheLockKey, getTagVersionKey, prepareCacheKey } from '../../src/keys';
 import { noopLogger, noopMetrics } from '../../src/observability';
 import type { NormalizedCacheConfig } from '../../src/types';
 
@@ -51,6 +51,12 @@ describe('cache keys', () => {
         expect(createVersionToken([null, '2', '10'])).toBe('0.2.10');
         expect(buildVersionedCacheKey('prismaCacheTags:v2:qry:Widget:findMany:abc', '0.2.10')).toBe(
             'prismaCacheTags:v2:qry:Widget:findMany:abc:0.2.10',
+        );
+    });
+
+    test('derives lock keys without a second hash', () => {
+        expect(getCacheLockKey('prismaCacheTags:v2:qry:Widget:findMany:abc:0')).toBe(
+            'prismaCacheTags:v2:qry:Widget:findMany:abc:0:lock',
         );
     });
 

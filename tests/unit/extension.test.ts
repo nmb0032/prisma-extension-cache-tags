@@ -123,6 +123,192 @@ describe('createCacheTagsExtension', () => {
 });
 
 describe('readThroughCache', () => {
+    test('serves a verified optimized hit without issuing a second value read', async () => {
+        const onCacheEvent = vi.fn();
+        const config = normalizeConfig({ metrics: { onCacheEvent } });
+        const query = vi.fn().mockResolvedValue([{ id: 'database' }]);
+        const preparedKey = prepareCacheKey('Widget', 'findMany', {}, [], [], config);
+        const cacheKey = buildVersionedCacheKey(preparedKey.baseKey, '');
+        const optimized = {
+            lookupVersioned: vi.fn().mockResolvedValue({
+                cacheKey,
+                value: serializeCacheEnvelope({ identity: preparedKey.identity, tenantScope: [], value: [{ id: 'cached' }] }),
+                lockAcquired: false,
+            }),
+            populateAndRelease: vi.fn(),
+            bumpTagVersions: vi.fn(),
+        };
+
+        const result = await readThroughCache({
+            model: 'Widget',
+            operation: 'findMany',
+            args: {},
+            cleanedArgs: {},
+            preparedRead: {
+                cleanedArgs: {},
+                normalizedTags: [],
+                tenantScope: [],
+                preparedKey,
+            },
+            query,
+            cacheOptions: {},
+            config,
+            redisAdapter: { ...redis, optimized },
+        });
+
+        expect(result).toEqual([{ id: 'cached' }]);
+        expect(query).not.toHaveBeenCalled();
+        expect(redis.callCounts.getString ?? 0).toBe(0);
+        expect(onCacheEvent).toHaveBeenCalledWith({ model: 'Widget', operation: 'findMany', result: 'hit', path: 'optimized' });
+    });
+
+    test('populates and releases an optimized cold owner atomically', async () => {
+        const config = normalizeConfig();
+        const query = vi.fn().mockResolvedValue([{ id: 'database' }]);
+        const preparedKey = prepareCacheKey('Widget', 'findMany', {}, [], [], config);
+        const cacheKey = buildVersionedCacheKey(preparedKey.baseKey, '');
+        const optimized = {
+            lookupVersioned: vi.fn().mockResolvedValue({ cacheKey, value: null, lockAcquired: true }),
+            populateAndRelease: vi.fn().mockResolvedValue(true),
+            bumpTagVersions: vi.fn(),
+        };
+
+        const result = await readThroughCache({
+            model: 'Widget',
+            operation: 'findMany',
+            args: {},
+            cleanedArgs: {},
+            preparedRead: {
+                cleanedArgs: {},
+                normalizedTags: [],
+                tenantScope: [],
+                preparedKey,
+            },
+            query,
+            cacheOptions: { ttlSeconds: 60 },
+            config,
+            redisAdapter: { ...redis, optimized },
+        });
+
+        expect(result).toEqual([{ id: 'database' }]);
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(optimized.populateAndRelease).toHaveBeenCalledWith(
+            expect.objectContaining({ cacheKey, ttlSeconds: 60, value: expect.any(String) }),
+        );
+        expect(redis.callCounts.deleteIfValue ?? 0).toBe(0);
+    });
+
+    test('returns the database result when an optimized owner loses population ownership', async () => {
+        const config = normalizeConfig();
+        const query = vi.fn().mockResolvedValue({ id: 'database' });
+        const preparedKey = prepareCacheKey('Widget', 'findUnique', { where: { id: 'w1' } }, [], [], config);
+        const cacheKey = buildVersionedCacheKey(preparedKey.baseKey, '');
+        const optimized = {
+            lookupVersioned: vi.fn().mockResolvedValue({ cacheKey, value: null, lockAcquired: true }),
+            populateAndRelease: vi.fn().mockResolvedValue(false),
+            bumpTagVersions: vi.fn(),
+        };
+
+        await expect(
+            readThroughCache({
+                model: 'Widget',
+                operation: 'findUnique',
+                args: { where: { id: 'w1' } },
+                cleanedArgs: { where: { id: 'w1' } },
+                preparedRead: {
+                    cleanedArgs: { where: { id: 'w1' } },
+                    normalizedTags: [],
+                    tenantScope: [],
+                    preparedKey,
+                },
+                query,
+                cacheOptions: {},
+                config,
+                redisAdapter: { ...redis, optimized },
+            }),
+        ).resolves.toEqual({ id: 'database' });
+
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(optimized.populateAndRelease).toHaveBeenCalledTimes(1);
+    });
+
+    test('rejects an optimized malformed payload without repopulating that generation', async () => {
+        const onCacheEvent = vi.fn();
+        const config = normalizeConfig({ metrics: { onCacheEvent } });
+        const query = vi.fn().mockResolvedValue([{ id: 'database' }]);
+        const preparedKey = prepareCacheKey('Widget', 'findMany', {}, [], [], config);
+        const cacheKey = buildVersionedCacheKey(preparedKey.baseKey, '');
+        const optimized = {
+            lookupVersioned: vi.fn().mockResolvedValue({ cacheKey, value: 'malformed', lockAcquired: false }),
+            populateAndRelease: vi.fn(),
+            bumpTagVersions: vi.fn(),
+        };
+
+        await expect(
+            readThroughCache({
+                model: 'Widget',
+                operation: 'findMany',
+                args: {},
+                cleanedArgs: {},
+                preparedRead: {
+                    cleanedArgs: {},
+                    normalizedTags: [],
+                    tenantScope: [],
+                    preparedKey,
+                },
+                query,
+                cacheOptions: {},
+                config,
+                redisAdapter: { ...redis, optimized },
+            }),
+        ).resolves.toEqual([{ id: 'database' }]);
+
+        expect(optimized.populateAndRelease).not.toHaveBeenCalled();
+        expect(redis.callCounts.delete).toBe(1);
+        expect(onCacheEvent).toHaveBeenCalledWith({
+            model: 'Widget',
+            operation: 'findMany',
+            result: 'bypass',
+            path: 'optimized',
+            reason: 'invalid-envelope',
+        });
+    });
+
+    test('falls back to command reads when the optimized lookup fails and records the script error', async () => {
+        const warn = vi.fn();
+        const onCacheEvent = vi.fn();
+        const config = normalizeConfig({
+            logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
+            metrics: { onCacheEvent },
+        });
+        const query = vi.fn().mockResolvedValue([{ id: 'database' }]);
+        const optimized = {
+            lookupVersioned: vi.fn().mockRejectedValue(new Error('script unavailable')),
+            populateAndRelease: vi.fn(),
+            bumpTagVersions: vi.fn(),
+        };
+
+        await expect(
+            readThroughCache({
+                model: 'Widget',
+                operation: 'findMany',
+                args: {},
+                cleanedArgs: {},
+                query,
+                cacheOptions: {},
+                config,
+                redisAdapter: { ...redis, optimized },
+            }),
+        ).resolves.toEqual([{ id: 'database' }]);
+
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(
+            expect.objectContaining({ primitive: 'lookupVersioned', retry: false, error: 'script unavailable' }),
+            'Redis cache script failed',
+        );
+        expect(onCacheEvent).toHaveBeenCalledWith({ model: 'Widget', operation: 'findMany', result: 'miss', path: 'fallback' });
+    });
+
     test('misses, calls the query, and populates the cache', async () => {
         const config = normalizeConfig({ tenantKeys: ['tenantId'] });
         const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);

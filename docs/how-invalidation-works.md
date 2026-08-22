@@ -24,7 +24,10 @@ For a read of `Widget.findMany`, the generated Redis key is shaped like
 `<prefix>:qry:Widget:findMany:<sha256>:<version-token>`. Current tag versions
 come from an `MGET` of `<prefix>:tagver:<tag>` counters on every fallback read.
 Missing versions are represented as zero, and the ordered values are joined
-with dots (for example, `0.2.10`). With no tags, the token is empty.
+with dots (for example, `0.2.10`). With no tags, the token is empty. The
+standalone optimized path performs the same ordered version reads, token
+construction, and cache lookup in one Lua primitive, so its key bytes are
+identical to the fallback key.
 
 ## Tag resolution and granularity
 
@@ -64,6 +67,17 @@ maximum cache TTL (normally ten times that TTL, with a 3600-second minimum), so
 a version cannot disappear while an entry from that generation is still
 retained.
 
+When the optimized primitive is available, invalidation passes the unique
+version keys to one Lua script. The script performs each `INCR` and matching
+`EXPIRE` atomically, preserving the same O(tags), scan-free behavior. If the
+script fails after a partial increment, the command fallback increments every
+key again and applies the retention TTL; an extra generation is safe because
+it cannot expose stale data.
+
+The version retention TTL is `Math.max(maxTtlSeconds * 10, 3600)`: the tenfold
+margin keeps counters available well beyond the longest cache entry, while the
+one-hour floor avoids premature generation resets for short-lived caches.
+
 ## Cache identity and stored values
 
 Each v2 cached value is stored as one flat SuperJSON string containing
@@ -78,6 +92,13 @@ The default prefix is `prismaCacheTags:v2`; v1 entries are deliberately
 ignored and are neither read nor migrated. The raw `RedisAdapter` methods
 `getString` and `setString` exchange these serialized strings directly, so the
 extension does not perform an intermediate JSON conversion.
+
+The optimized lookup also atomically derives `<versioned-cache-key>:lock`,
+checks the value twice around `SET NX PX`, and returns the raw string plus
+ownership flag. A matching owner uses a second Lua primitive to verify the
+token, set the envelope TTL, and delete the lock in one operation. Waiters
+check immediately and then poll with bounded `2, 4, 8, ...` millisecond
+backoff, capped by their configured interval and deadline.
 
 ## Transactions
 

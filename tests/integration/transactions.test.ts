@@ -9,6 +9,8 @@ const redis = await createRedis();
 const counter = createQueryCounter();
 const prisma = createCachedClient(redis, counter);
 const redisAdapter = createNodeRedisAdapter(redis);
+const fallbackCounter = createQueryCounter();
+const fallbackPrisma = createCachedClient(redis, fallbackCounter, {}, {}, createNodeRedisAdapter(redis, { optimized: false }));
 const tagVersionKey = getTagVersionKey('tenant:t1:model:Widget', normalizeConfig({ tenantKeys: ['tenantId'] }));
 
 function asTransactionBatch(operations: Promise<unknown>[]): Prisma.PrismaPromise<unknown>[] {
@@ -20,7 +22,7 @@ afterAll(async () => {
     try {
         await redis.flushDb();
     } finally {
-        await Promise.allSettled([redis.quit(), prisma.$disconnect()]);
+        await Promise.allSettled([redis.quit(), prisma.$disconnect(), fallbackPrisma.$disconnect()]);
     }
 });
 
@@ -29,6 +31,7 @@ beforeEach(async () => {
     await prisma.part.deleteMany();
     await prisma.widget.deleteMany();
     counter.reset();
+    fallbackCounter.reset();
 });
 
 describe('transaction-aware invalidation', () => {
@@ -53,6 +56,20 @@ describe('transaction-aware invalidation', () => {
 
         const after = await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
         expect(after).toHaveLength(3);
+    });
+
+    test('the command fallback defers invalidation until a transaction commits', async () => {
+        await fallbackPrisma.widget.create({ data: { tenantId: 't1', name: 'w1' } });
+        fallbackCounter.reset();
+        await fallbackPrisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+        const readsBefore = fallbackCounter.byModel.Widget ?? 0;
+
+        await fallbackPrisma.$transaction(async (tx) => {
+            await tx.widget.create({ data: { tenantId: 't1', name: 'w2' } });
+        });
+        await fallbackPrisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+
+        expect(fallbackCounter.byModel.Widget).toBe(readsBefore + 2);
     });
 
     test('a committed batch transaction flushes one invalidation after all writes', async () => {

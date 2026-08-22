@@ -31,15 +31,15 @@ function percentile(sorted: number[], p: number): number {
     return sorted[index] ?? 0;
 }
 
-function parseIncrByCalls(info: string): number {
-    const line = info.split('\n').find((entry) => entry.startsWith('cmdstat_incrby:'));
+function parseCommandCalls(info: string, command: string): number {
+    const line = info.split('\n').find((entry) => entry.startsWith(`cmdstat_${command}:`));
     const calls = line?.match(/calls=(\d+)/)?.[1];
     return Number(calls ?? 0);
 }
 
-async function getIncrByCalls(client: RedisClient): Promise<number> {
+async function getInvalidationCalls(client: RedisClient, command: 'evalsha' | 'incrby'): Promise<number> {
     const info = await client.sendCommand(['INFO', 'commandstats']);
-    return parseIncrByCalls(String(info));
+    return parseCommandCalls(String(info), command);
 }
 
 async function main(): Promise<void> {
@@ -58,6 +58,7 @@ async function main(): Promise<void> {
 
         const config = normalizeConfig({ tenantKeys: ['tenantId'] });
         const adapter = createNodeRedisAdapter(client);
+        const invalidationCommand = adapter.optimized ? 'evalsha' : 'incrby';
         const results: Array<{ keyspace: number; p50: number; p99: number }> = [];
         const incrementCalls: number[] = [];
 
@@ -65,7 +66,7 @@ async function main(): Promise<void> {
             await client.flushDb();
             await seedKeyspace(client, size);
 
-            const callsBefore = await getIncrByCalls(client);
+            const callsBefore = await getInvalidationCalls(client, invalidationCommand);
             const durations: number[] = [];
             for (let index = 0; index < INVALIDATIONS_PER_SIZE; index += 1) {
                 const startedAt = process.hrtime.bigint();
@@ -73,7 +74,7 @@ async function main(): Promise<void> {
                 durations.push(Number(process.hrtime.bigint() - startedAt) / 1_000_000);
             }
 
-            const callsAfter = await getIncrByCalls(client);
+            const callsAfter = await getInvalidationCalls(client, invalidationCommand);
             incrementCalls.push(callsAfter - callsBefore);
 
             durations.sort((a, b) => a - b);
@@ -88,10 +89,10 @@ async function main(): Promise<void> {
             })),
         );
 
-        console.log(`Observed Redis INCRBY calls per keyspace: ${incrementCalls.join(', ')}.`);
+        console.log(`Observed Redis ${invalidationCommand.toUpperCase()} calls per keyspace: ${incrementCalls.join(', ')}.`);
         if (incrementCalls.some((calls) => calls !== INVALIDATIONS_PER_SIZE)) {
             throw new Error(
-                `FAIL: expected exactly ${INVALIDATIONS_PER_SIZE} Redis INCRBY calls per keyspace, observed ${incrementCalls.join(', ')}.`,
+                `FAIL: expected exactly ${INVALIDATIONS_PER_SIZE} Redis ${invalidationCommand.toUpperCase()} calls per keyspace, observed ${incrementCalls.join(', ')}.`,
             );
         }
 

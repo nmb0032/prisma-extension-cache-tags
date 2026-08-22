@@ -43,6 +43,27 @@ describe('read-through caching', () => {
         expect(counter.byModel.Widget).toBe(1);
     });
 
+    test('custom keys isolate model, operation, and argument identities', async () => {
+        const first = await prisma.widget.create({ data: { tenantId: 't1', name: 'first' } });
+        const second = await prisma.widget.create({ data: { tenantId: 't1', name: 'second' } });
+        const part = await prisma.part.create({
+            data: { tenantId: 't1', label: 'part', widgetId: first.id },
+        });
+        counter.reset();
+        const cache = { key: 'shared-query', tags: ['shared'], inferTags: false };
+
+        const firstWidgets = await prisma.widget.findMany({ where: { name: 'first' }, cache });
+        const secondWidgets = await prisma.widget.findMany({ where: { name: 'second' }, cache });
+        const firstWidgetCount = await prisma.widget.count({ where: { name: 'first' }, cache });
+        const parts = await prisma.part.findMany({ where: { label: 'part' }, cache });
+
+        expect(firstWidgets.map((widget) => widget.id)).toEqual([first.id]);
+        expect(secondWidgets.map((widget) => widget.id)).toEqual([second.id]);
+        expect(firstWidgetCount).toBe(1);
+        expect(parts.map((result) => result.id)).toEqual([part.id]);
+        expect(counter.total).toBe(4);
+    });
+
     test('semantically equal filters share one cache entry across independent clients', async () => {
         const counterA = createQueryCounter();
         const counterB = createQueryCounter();

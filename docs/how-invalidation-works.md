@@ -19,10 +19,12 @@ hashing the query identity. `tagVersions` come from an `MGET` of
 is empty and there are no counter keys to request.
 
 When `cache.key` is supplied, the extension uses the custom-key form
-`<prefix>:custom:<hash({ key, schemaVersion, tagVersions })>` instead. The
-custom key replaces the generated model/operation/argument identity in the
-Redis key, while the cached envelope still performs its full fingerprint check
-on read.
+`<prefix>:custom:<hash({ key, model, operation, args, schemaVersion,
+tagVersions })>` instead. `args` are the cleaned Prisma arguments with the
+extension-only `cache` property removed. The caller-provided key participates
+in identity without replacing the query identity, so reusing a custom key for
+different models, operations, or arguments cannot make those queries share an
+entry.
 
 For a read of `Widget.findMany`, the generated Redis key is shaped like
 `<prefix>:qry:Widget:findMany:<hash>`. The hash also includes the Prisma
@@ -55,28 +57,26 @@ tags and increments each unique tag counter. Invalidation cost is therefore
 independent of how many keys are cached: it is one `INCR` per affected tag, not
 one delete per matching key. The tag-resolution mode described above determines
 which generations the write advances; the invalidation mechanism itself never
-enumerates cache keys.
+enumerates cache keys. `maxTagsPerQuery` limits only the tags folded into a
+cached read key; writes advance every resolved tag.
 
 There is no tag-to-key index to maintain or garbage-collect. Incrementing a
 counter makes every older generation unreachable immediately. Those orphaned
 keys still occupy memory until their own TTL expires; that is the deliberate
-trade-off that makes invalidation constant-time. Tag-version keys also receive
-an expiry of at least the configured maximum cache TTL (normally ten times that
-TTL, with a 3600-second minimum), so a version cannot disappear while an entry
-from that generation is still retained.
+trade-off that keeps invalidation scan-free and independent of the cached-key
+count. Tag-version keys also receive an expiry of at least the configured
+maximum cache TTL (normally ten times that TTL, with a 3600-second minimum), so
+a version cannot disappear while an entry from that generation is still
+retained.
 
-## Fingerprint verification
+## Cache identity and stored values
 
-Each cached value is stored in a serialized envelope with a fingerprint. On a
-read, the extension recomputes the fingerprint from the model, operation,
-arguments, normalized tags, and `schemaVersion`, then compares it with the
-envelope before deserializing the value.
-
-If the fingerprint differs, the entry is deleted and treated as a miss. This
-means a hash collision, a stale schema, or an entry written for a different
-request cannot be served as a valid result. `schemaVersion` is also part of
-cache identity, so bumping it is the explicit way to retire all generations
-after a breaking cached-shape change.
+Each cached value is stored in a serialized envelope containing only the
+SuperJSON value. Stage 1 does not store or verify a second fingerprint; the
+generated or custom Redis key is the query identity. Both key forms include the
+model, operation, cleaned arguments, `schemaVersion`, and normalized tag
+generations. `schemaVersion` is therefore the explicit way to retire all
+generations after a breaking cached-shape change.
 
 ## Transactions
 

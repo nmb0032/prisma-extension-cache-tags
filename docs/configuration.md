@@ -14,7 +14,7 @@ The extension uses the defaults below when a field is omitted.
 | `cacheNull` | `boolean` | `true` | Allows `null` read results to be cached. |
 | `cacheEmpty` | `boolean` | `true` | Allows empty-array read results to be cached. |
 | `schemaVersion` | `number` | `1` | Adds a schema generation to cache identity. Bump it after a breaking change to cached shapes to invalidate every cache entry at once. |
-| `maxTagsPerQuery` | `number` | `30` | Maximum number of normalized tags retained for one read or write. |
+| `maxTagsPerQuery` | `number` | `30` | Maximum number of normalized tags retained in a cached read key. Writes always invalidate every resolved tag. |
 | `stampede` | `CacheStampedeOptions` | `{ waitMs: 1500, pollMs: 50, lockTtlMs: 5000 }` | Default distributed single-flight settings for cache misses. |
 | `dependencyTags` | `Record<string, string[] \| CacheDependencyResolver>` | `{}` | Adds model or custom tags to a write so related model reads are invalidated too. |
 | `inferTags` | `boolean` | `true` | Enables automatic tenant, model, and entity tag inference. |
@@ -47,7 +47,7 @@ With the default `tenantPrecision: false`, every inferred read and write emits
 the unscoped `global:model:<Model>` tag. Tenant and entity tags are added when
 their values are available, but invalidation granularity remains model-level so
 ambiguous arguments cannot leave a cached read stale. The global model tag is
-retained when `maxTagsPerQuery` truncates the tag list.
+retained when `maxTagsPerQuery` truncates the read tag list.
 
 Set `tenantPrecision: true` only when every cached read and every write includes
 one of `tenantKeys` in its arguments. Tenant-resolved reads then use tenant tags
@@ -112,9 +112,8 @@ const config: CacheTagsConfig = {
 
 ### Schema version
 
-`schemaVersion` is part of both the generated key and the cached fingerprint.
-Bump it to invalidate every cache entry at once after a breaking change to
-cached shapes.
+`schemaVersion` is part of both generated and custom cache keys. Bump it to
+invalidate every cache entry at once after a breaking change to cached shapes.
 
 ```ts
 import type { CacheTagsConfig } from 'prisma-extension-cache-tags';
@@ -188,7 +187,7 @@ Caching is opt-in: add a `cache` object to a supported read operation
 | Name | Type | Default | What it does |
 | --- | --- | --- | --- |
 | `ttlSeconds` | `number` | `config.defaultTtlSeconds` | Requested cache TTL, clamped to `config.maxTtlSeconds` and never below one second (including for zero or negative requests). |
-| `key` | `string` | Generated key | Uses a stable custom key while still incorporating schema and tag generations. |
+| `key` | `string` | Generated key | Adds a caller-provided component to cache identity. Model, operation, cleaned arguments, schema, and tag generations still participate, so distinct queries cannot alias through a shared custom key. |
 | `enabled` | `boolean` | `true` when `cache` is present | Set to `false` to bypass the cache for one read. |
 | `debug` | `boolean` | `false` | Emits debug hit, miss, and population messages through `logger`. |
 | `tags` | `string[]` | `[]` | Adds explicit invalidation tags. |

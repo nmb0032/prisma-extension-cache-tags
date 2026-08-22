@@ -58,12 +58,18 @@ function normalizeTtl(options: CacheReadOptions, config: NormalizedCacheConfig):
 
 async function generateCustomCacheKey(
     key: string,
+    model: string,
+    operation: string,
+    cleanedArgs: unknown,
     tags: string[],
     config: NormalizedCacheConfig,
     redisAdapter: RedisAdapter,
 ): Promise<string> {
     return `${config.keyPrefix}:custom:${hash({
         key,
+        model,
+        operation,
+        args: cleanedArgs,
         schemaVersion: config.schemaVersion,
         tagVersions: await getTagVersions(tags, config, redisAdapter),
     })}`;
@@ -99,7 +105,7 @@ export async function readThroughCache(params: {
 
     try {
         cacheKey = cacheOptions.key
-            ? await generateCustomCacheKey(cacheOptions.key, resolvedTags.tags, config, redisAdapter)
+            ? await generateCustomCacheKey(cacheOptions.key, model, operation, cleanedArgs, resolvedTags.tags, config, redisAdapter)
             : await generateCacheKey(model, operation, args, resolvedTags.tags, config, redisAdapter);
     } catch (error) {
         config.logger.warn(

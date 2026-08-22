@@ -6,4 +6,5 @@ coverage/
 tests/fixture/generated/
 .env
 .superpowers/
+.worktrees/
 .comparison-implementation-report.md

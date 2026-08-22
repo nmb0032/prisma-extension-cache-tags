@@ -185,11 +185,20 @@ export function resolveCacheTags(
     const candidateTags = shouldMerge ? [...inferredTags, ...explicitTags] : explicitTags;
     const modelTag = createModelTag(model);
     const modelTagWasEmitted = shouldInfer && shouldMerge && inferredTags.includes(modelTag);
-    const maxTags = isReadOperation ? config.maxTagsPerQuery : Number.POSITIVE_INFINITY;
+    const normalizedCandidateTags = normalizeTags(candidateTags, Number.POSITIVE_INFINITY);
+    const exceedsTenantPrecisionLimit =
+        isReadOperation && config.tenantPrecision && normalizedCandidateTags.length > config.maxTagsPerQuery;
 
     return {
-        tags: normalizeTags(candidateTags, maxTags, modelTagWasEmitted ? modelTag : undefined),
+        tags: exceedsTenantPrecisionLimit
+            ? normalizedCandidateTags
+            : normalizeTags(
+                  candidateTags,
+                  isReadOperation ? config.maxTagsPerQuery : Number.POSITIVE_INFINITY,
+                  modelTagWasEmitted ? modelTag : undefined,
+              ),
         tenantIds,
         entityIds,
+        ...(exceedsTenantPrecisionLimit ? { cacheable: false, bypassReason: 'tenant-tag-limit' as const } : {}),
     };
 }

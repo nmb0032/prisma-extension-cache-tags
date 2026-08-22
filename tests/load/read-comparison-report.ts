@@ -32,7 +32,7 @@ export type ReadComparisonReportRow = {
     'p99 (ms)': string;
     'cache hits': number;
     'cache misses': number;
-    'cache hit rate': string;
+    'cache-event hit rate': string;
     'database queries': number;
     'event-loop utilization': string;
     'event-loop active (ms)': string;
@@ -110,7 +110,7 @@ export function buildReadComparisonReportRow(phase: ReadComparisonPhase): ReadCo
         'p99 (ms)': phase.p99Ms.toFixed(2),
         'cache hits': phase.cacheHits,
         'cache misses': phase.cacheMisses,
-        'cache hit rate': `${(phase.cacheHitRate * 100).toFixed(1)}%`,
+        'cache-event hit rate': `${(phase.cacheHitRate * 100).toFixed(1)}%`,
         'database queries': phase.databaseQueries,
         'event-loop utilization': `${(phase.eventLoop.utilization * 100).toFixed(1)}%`,
         'event-loop active (ms)': phase.eventLoop.activeMs.toFixed(2),

@@ -37,6 +37,8 @@ export interface PreparedRead {
     normalizedTags: string[];
     tenantScope: string[];
     preparedKey: PreparedCacheKey;
+    cacheable?: boolean;
+    bypassReason?: 'tenant-tag-limit';
 }
 
 interface CachedHit {
@@ -94,6 +96,8 @@ function prepareRead(
         normalizedTags: resolvedTags.tags,
         tenantScope: preparedKey.tenantScope,
         preparedKey,
+        cacheable: resolvedTags.cacheable,
+        bypassReason: resolvedTags.bypassReason,
     };
 }
 
@@ -484,9 +488,22 @@ async function readThroughOptimized(params: ReadThroughParams, preparedRead: Pre
 }
 
 export async function readThroughCache(params: ReadThroughParams): Promise<unknown> {
-    const { model, operation, args, cleanedArgs, cacheOptions, config, redisAdapter } = params;
+    const { model, operation, args, cleanedArgs, query, cacheOptions, config, redisAdapter } = params;
     const ttlSeconds = normalizeTtl(cacheOptions, config);
     const preparedRead = params.preparedRead ?? prepareRead(model, operation, cleanedArgs, args, cacheOptions, config);
+
+    if (preparedRead.cacheable === false) {
+        const reason = preparedRead.bypassReason ?? 'tenant-tag-limit';
+        config.logger.warn({ model, operation, reason }, 'Cache read bypassed safely');
+        config.metrics.onCacheEvent({
+            model,
+            operation,
+            result: 'bypass',
+            path: 'bypass',
+            reason,
+        });
+        return query(cleanedArgs);
+    }
 
     if (redisAdapter.optimized) {
         return readThroughOptimized(params, preparedRead, ttlSeconds);

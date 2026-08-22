@@ -20,7 +20,7 @@ describe('benchmark reporting', () => {
             'p50 (ms)': '12.00',
             'p95 (ms)': '12.00',
             'p99 (ms)': '12.00',
-            'cache hit rate': '0.0%',
+            'cache-event hit rate': '0.0%',
             'database queries': 0,
             errors: 1,
             'freshness failures': 1,

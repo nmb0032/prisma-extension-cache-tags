@@ -67,7 +67,7 @@ describe('read-only cache comparison reporting', () => {
             'p99 (ms)': '12.00',
             'cache hits': 0,
             'cache misses': 0,
-            'cache hit rate': '0.0%',
+            'cache-event hit rate': '0.0%',
             'database queries': 0,
             'event-loop utilization': '0.0%',
             'event-loop active (ms)': '0.00',

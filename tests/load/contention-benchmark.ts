@@ -41,7 +41,8 @@ export async function runColdKeyContention(
     const loserSamples: number[] = [];
     const clients = fixture.clients.slice(0, contenders);
     await Promise.all(clients.map((client) => client.$connect()));
-    const eventLoopStart = performance.eventLoopUtilization();
+    let eventLoopActiveMs = 0;
+    let eventLoopIdleMs = 0;
 
     for (let round = 0; round < rounds; round += 1) {
         await deleteRedisNamespace(fixture.redis, fixture.keyPrefix);
@@ -62,8 +63,12 @@ export async function runColdKeyContention(
             });
             return { result, latencyMs: performance.now() - startedAt };
         });
+        const eventLoopStart = performance.eventLoopUtilization();
         release();
         const samples = await Promise.all(calls);
+        const eventLoopDelta = performance.eventLoopUtilization(eventLoopStart);
+        eventLoopActiveMs += eventLoopDelta.active;
+        eventLoopIdleMs += eventLoopDelta.idle;
         const expectedResult = canonicalizePrismaValue(samples[0]!.result);
         if (samples.some(({ result }) => canonicalizePrismaValue(result) !== expectedResult)) {
             throw new Error(`Cold-key contention returned unequal results in round ${round + 1}`);
@@ -80,7 +85,6 @@ export async function runColdKeyContention(
         loserSamples.push(...latencies.slice(1));
     }
 
-    const eventLoopDelta = performance.eventLoopUtilization(eventLoopStart);
     return {
         rounds,
         contenders,
@@ -88,8 +92,8 @@ export async function runColdKeyContention(
         winner: summarizeLatencies(winnerSamples),
         losers: summarizeLatencies(loserSamples),
         eventLoop: summarizeEventLoopDelta({
-            active: eventLoopDelta.active,
-            idle: eventLoopDelta.idle,
+            active: eventLoopActiveMs,
+            idle: eventLoopIdleMs,
         }),
     };
 }

@@ -46,7 +46,10 @@ unscoped model tag so tenant-less reads are still invalidated. A write without a
 resolved tenant falls back to unscoped global tags and logs a warning; callers
 must maintain the invariant for tenant-precise reads to remain sound. When tag
 lists are capped, an emitted unscoped model tag is retained before other tags
-are truncated.
+are truncated. In tenant-precision mode, reads whose complete tenant,
+dependency, or entity tag set exceeds `maxTagsPerQuery` bypass caching instead
+of dropping a correctness-bearing tag; the bypass is reported with reason
+`tenant-tag-limit`.
 
 ## What a write does
 

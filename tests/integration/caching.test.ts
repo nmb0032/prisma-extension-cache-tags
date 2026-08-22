@@ -365,6 +365,57 @@ describe('read-through caching', () => {
         expect(refreshed.flat().every((widget) => widget.name === 'updated')).toBe(true);
     });
 
+    test('bypasses a broad over-cap read so an omitted-tail tenant/entity write cannot stay stale', async () => {
+        const onCacheEvent = vi.fn();
+        const precise = createCachedClient(redis, counter, {
+            tenantPrecision: true,
+            maxTagsPerQuery: 5,
+            metrics: { onCacheEvent },
+        });
+        dependentClients.push(precise);
+        const tenantIds = Array.from({ length: 20 }, (_, index) => `broad:t${index}`);
+        const widgets = await Promise.all(
+            tenantIds.map((tenantId) => precise.widget.create({ data: { tenantId, name: 'initial' } })),
+        );
+        const entityIds = widgets.map((widget) => widget.id);
+        counter.reset();
+
+        const args = {
+            where: {
+                tenantId: { in: tenantIds },
+                id: { in: entityIds },
+            },
+            orderBy: { id: 'asc' as const },
+            cache: { ttlSeconds: 60 },
+        };
+        const initial = await precise.widget.findMany(args);
+        await precise.widget.update({
+            where: { id: widgets[19]!.id },
+            data: { name: 'updated-tail' },
+        });
+        const refreshed = await precise.widget.findMany(args);
+
+        expect(initial).toHaveLength(20);
+        expect(refreshed.find((widget) => widget.id === widgets[19]!.id)?.name).toBe('updated-tail');
+        expect(counter.byModel.Widget).toBe(3); // broad read + write + broad re-read
+        expect(onCacheEvent).toHaveBeenCalledTimes(2);
+        expect(onCacheEvent).toHaveBeenNthCalledWith(1, {
+            model: 'Widget',
+            operation: 'findMany',
+            result: 'bypass',
+            path: 'bypass',
+            reason: 'tenant-tag-limit',
+        });
+        expect(onCacheEvent).toHaveBeenNthCalledWith(2, {
+            model: 'Widget',
+            operation: 'findMany',
+            result: 'bypass',
+            path: 'bypass',
+            reason: 'tenant-tag-limit',
+        });
+        expect(await redis.keys('prismaCacheTags:v2:qry:*')).toEqual([]);
+    });
+
     test('dependency tags invalidate across models', async () => {
         const dependent = createCachedClient(redis, counter, { dependencyTags: { Part: ['Widget'] } });
         dependentClients.push(dependent);

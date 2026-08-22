@@ -64,7 +64,8 @@ cold reads run once after clearing only the validated current-run namespace;
 warm reads repeat the exact plan without cleanup. The same client concurrency is
 used for every measured phase, results are checked by deterministic digest, and
 each row reports completed reads, elapsed time, throughput, p50/p95/p99
-latency, cache hits/misses/hit rate, database queries, and event-loop
+latency, cache hits/misses, cache-event hit rate (including waiter hits and
+bypasses), database queries, and event-loop
 utilization. The report calculates symmetric raw A/B drift. At no more than 10%
 drift, speedups use the mean raw throughput; otherwise comparative speedups
 render as `unstable`.
@@ -73,9 +74,10 @@ Each phase also prints a separate per-query-kind table for
 `widgetUnique`, `partUnique`, `widgetList`, `partList`, and
 `widgetAggregate`, so an aggregate row cannot hide a regressing kind.
 
-Next, 32 independent clients start the same cold-key read behind a shared
-barrier. Quick runs execute 10 rounds and stress runs execute 30. Each round
-must issue exactly one database query and return equal results. The report
+Next, 32 independent Prisma clients sharing one Redis connection start the same
+cold-key read behind a shared barrier. Quick runs execute 10 rounds and stress
+runs execute 30. Each round must issue exactly one database query and return
+equal results. The report
 separates the fastest request in each round as the winner sample and reports
 p50/p95/p99 for winners and the remaining loser samples.
 
@@ -93,10 +95,12 @@ and each benchmark Prisma client is capped at one PostgreSQL connection so the
 stress profile stays within its concurrency budget.
 
 Before workers start, isolated warm-read, cold-read, write, and multi-tag
-invalidation probes capture Redis `INFO commandstats` deltas. These are
-process-wide counters rather than namespace-local counts. The command columns
-are `get`, `mget`, `set`, `eval`, `evalsha`, nested `incr`, fallback `incrby`,
-and `expire`; multi-tag invalidation reports the nested logical increment count.
+invalidation probes assert their expected cache events and database-query counts
+before reporting Redis `INFO commandstats` deltas. These are process-wide
+counters rather than namespace-local counts. The command columns are `get`,
+`mget`, `set`, `eval`, `evalsha`, nested `incr`, fallback `incrby`, and `expire`;
+multi-tag invalidation reports the nested logical increment count. A failed
+prime or populate aborts the benchmark before a probe can look successful.
 Every measured phase, including command probes, contention, and mixed
 correctness, reports event-loop active/idle milliseconds and utilization.
 
@@ -106,8 +110,8 @@ unique reads and writes. `list-heavy` uses `take: 100`, deterministic
 or aggregate reads. `zipfian` uses a seeded PRNG with exponent 1.1, repeated identities across the
 complete five-kind query set, and an approximately 80% hottest-20% traffic
 target (reported with a documented ±10% tolerance). Both workloads use the same
-finite raw/cold/warm plan and the contention phase checks equal results with
-bounded database work.
+finite raw-A/cold/warm/raw-B plan and the contention phase checks equal results
+with bounded database work.
 
 To target a network-separated or latency-injected Redis, set `TEST_REDIS_URL`:
 

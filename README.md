@@ -1,6 +1,6 @@
 # prisma-extension-cache-tags
 
-Redis caching for Prisma with automatic, generational tag invalidation — a write is a single `INCR`, never a `SCAN`.
+Redis caching for Prisma with automatic, generational tag invalidation — invalidation is O(tags), independent of cache keyspace size, never a `SCAN`.
 
 ## Install
 
@@ -70,7 +70,7 @@ warning. If the invariant is not guaranteed, keep the safe default.
 
 ## How invalidation works
 
-On a cached read, the extension infers tenant, model, and entity tags from the Prisma arguments. Configure argument names with `tenantKeys` and `entityKeys`, or add explicit `cache.tags` when a query needs a broader or custom scope. The default model-level fallback is retained whenever it is emitted, even when `maxTagsPerQuery` truncates a read's tag list. The limit never truncates write invalidation tags.
+On a cached read, the extension infers tenant, model, and entity tags from the Prisma arguments. Configure argument names with `tenantKeys` and `entityKeys`, or add explicit `cache.tags` when a query needs a broader or custom scope. The default model-level fallback is retained whenever it is emitted, even when `maxTagsPerQuery` truncates a read's tag list. In tenant-precision mode, a read whose required tags exceed the limit safely bypasses caching instead of dropping invalidation tags. The limit never truncates write invalidation tags.
 
 Each tag has a Redis version counter, and the current counter values are folded into the cache key. A read therefore selects the current generation without maintaining a list of every key that carries the tag.
 
@@ -120,7 +120,7 @@ through the optional `metrics.onScriptEvent` hook before the safe fallback runs.
 
 ## Features
 
-- Generational O(1) invalidation
+- Generational O(tags) invalidation, independent of cache keyspace size
 - Automatic tag inference
 - Cross-model `dependencyTags`
 - Transaction-deferred flush
@@ -130,11 +130,11 @@ through the optional `metrics.onScriptEvent` hook before the safe fallback runs.
 
 ## Comparison and limits
 
-The design deliberately focuses on predictable Prisma read-through caching and constant-time invalidation. These are the important boundaries:
+The design deliberately focuses on predictable Prisma read-through caching and tag-scaled invalidation that is independent of cache keyspace size. These are the important boundaries:
 
 | Area | This package provides | Deliberate limit |
 | --- | --- | --- |
-| Invalidation | Generational tag counters; a write performs one `INCR` per affected tag and never scans cache keys | Orphaned generations remain in Redis until their TTL expires |
+| Invalidation | Generational tag counters; a write performs one `INCR` per affected tag (O(tags)) and never scans cache keys | Orphaned generations remain in Redis until their TTL expires |
 | Revalidation | Read-through cache with distributed single-flight locking | No stale-while-revalidate |
 | Value storage | Superjson envelopes through a normal Redis client | No RedisJSON integration |
 | Runtime | Prisma 7 driver-adapter setup for supported Node releases | Edge-runtime testing is not provided |
@@ -174,7 +174,7 @@ The report shows symmetric raw A/B drift. When drift is at most 10%, speedups
 use the arithmetic mean of both raw samples; otherwise they render as
 `unstable`.
 
-The load benchmark also synchronizes 32 independent clients on one cold key.
+The load benchmark also synchronizes 32 independent Prisma clients sharing one Redis connection on one cold key.
 Quick runs use 10 rounds and stress runs use 30, reporting one database-query
 count per round plus winner and loser p50/p95/p99 latency. It then prints the
 existing blended 90% read / 10% write report for invalidation, distributed
@@ -206,7 +206,8 @@ The invalidation benchmark reports p50 and p99 invalidation latency by keyspace
 and verifies one logical increment per invalidation: optimized Redis `EVALSHA`
 contains a nested `INCR`, while forced fallback mode reports `INCRBY`. The
 blended model-backed report
-continues to include throughput, p50/p95/p99 latency, cache hit rate, database
+continues to include throughput, p50/p95/p99 latency, cache-event hit rate
+(hits divided by cache events, including waiter hits and bypasses), database
 query count, errors, and freshness failures. The preceding comparison has its
 own rows and counters, so its read-only measurements do not alter the mixed
 workload report. A focused Redis `INFO commandstats` probe can isolate warm

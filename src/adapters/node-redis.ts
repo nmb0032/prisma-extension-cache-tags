@@ -32,6 +32,7 @@ function isClusterClient(client: NodeRedisClientLike): boolean {
 }
 
 export function createNodeRedisAdapter(client: NodeRedisClientLike, options: NodeRedisAdapterOptions = {}): RedisAdapter {
+    const clusterClient = isClusterClient(client);
     const adapter: RedisAdapter = {
         async getString(key: string): Promise<string | null> {
             return client.get(key);
@@ -49,7 +50,10 @@ export function createNodeRedisAdapter(client: NodeRedisClientLike, options: Nod
             await client.expire(key, ttlSeconds);
         },
         async mgetString(keys: string[]): Promise<Array<string | null>> {
-            return keys.length === 0 ? [] : client.mGet(keys);
+            if (keys.length === 0) {
+                return [];
+            }
+            return clusterClient ? Promise.all(keys.map((key) => client.get(key))) : client.mGet(keys);
         },
         async setIfNotExists(key: string, value: string, ttlMs: number): Promise<boolean> {
             const result = await client.set(key, value, { NX: true, PX: ttlMs });
@@ -61,7 +65,7 @@ export function createNodeRedisAdapter(client: NodeRedisClientLike, options: Nod
         },
     };
 
-    if (options.optimized !== false && !isClusterClient(client) && client.scriptLoad && client.evalSha) {
+    if (options.optimized !== false && !clusterClient && client.scriptLoad && client.evalSha) {
         adapter.optimized = createOptimizedRedisPrimitives({
             load: (source) => client.scriptLoad!(source),
             evalSha: (sha, keys, args) => client.evalSha!(sha, { keys, arguments: args }),

@@ -175,6 +175,29 @@ describe('resolveCacheTags', () => {
             expect(resolved.tags).toContain('tenant:t19:model:Widget');
             expect(resolved.tags.length).toBeGreaterThan(5);
         });
+
+        test('marks over-cap tenant-precise reads uncacheable instead of truncating required tags', () => {
+            const tenantIds = Array.from({ length: 20 }, (_, index) => `t${index}`);
+            const entityIds = Array.from({ length: 20 }, (_, index) => `w${index}`);
+            const resolved = resolveCacheTags(
+                'Widget',
+                'findMany',
+                { where: { tenantId: { in: tenantIds }, id: { in: entityIds } } },
+                undefined,
+                makeConfig({
+                    tenantKeys: ['tenantId'],
+                    tenantPrecision: true,
+                    maxTagsPerQuery: 5,
+                }),
+                false,
+            );
+
+            expect((resolved as { cacheable?: boolean }).cacheable).toBe(false);
+            expect((resolved as { bypassReason?: string }).bypassReason).toBe('tenant-tag-limit');
+            expect(resolved.tags).toContain('tenant:t19:model:Widget');
+            expect(resolved.tags).toContain('tenant:t19:widget:w19');
+            expect(resolved.tags.length).toBeGreaterThan(5);
+        });
     });
 
     test('falls back to the global namespace when no tenantKeys are configured', () => {

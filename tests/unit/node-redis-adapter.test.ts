@@ -86,4 +86,34 @@ describe('node-redis adapter', () => {
 
         expect(createNodeRedisAdapter(client).optimized).toBeUndefined();
     });
+
+    test('reads Cluster tag versions with ordered per-key GETs instead of MGET', async () => {
+        const values = new Map([
+            ['tag:a', '7'],
+            ['tag:b', null],
+            ['tag:c', '9'],
+        ]);
+        const get = vi.fn(async (key: string) => values.get(key) ?? null);
+        const mGet = vi.fn(() => {
+            throw new Error('Cluster MGET must not be used');
+        });
+        const client: NodeRedisClientLike = {
+            isCluster: true,
+            get,
+            set: vi.fn(),
+            del: vi.fn(),
+            incrBy: vi.fn(),
+            expire: vi.fn(),
+            mGet,
+            eval: vi.fn(),
+        };
+
+        const adapter = createNodeRedisAdapter(client);
+
+        await expect(adapter.mgetString(['tag:a', 'tag:b', 'tag:c'])).resolves.toEqual(['7', null, '9']);
+        expect(get).toHaveBeenNthCalledWith(1, 'tag:a');
+        expect(get).toHaveBeenNthCalledWith(2, 'tag:b');
+        expect(get).toHaveBeenNthCalledWith(3, 'tag:c');
+        expect(mGet).not.toHaveBeenCalled();
+    });
 });

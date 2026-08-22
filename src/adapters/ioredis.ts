@@ -34,6 +34,7 @@ function isClusterClient(client: IoRedisClientLike): boolean {
 }
 
 export function createIoRedisAdapter(client: IoRedisClientLike, options: IoRedisAdapterOptions = {}): RedisAdapter {
+    const clusterClient = isClusterClient(client);
     const adapter: RedisAdapter = {
         async getString(key: string): Promise<string | null> {
             return client.get(key);
@@ -55,7 +56,10 @@ export function createIoRedisAdapter(client: IoRedisClientLike, options: IoRedis
             await client.expire(key, ttlSeconds);
         },
         async mgetString(keys: string[]): Promise<Array<string | null>> {
-            return keys.length === 0 ? [] : client.mget(keys);
+            if (keys.length === 0) {
+                return [];
+            }
+            return clusterClient ? Promise.all(keys.map((key) => client.get(key))) : client.mget(keys);
         },
         async setIfNotExists(key: string, value: string, ttlMs: number): Promise<boolean> {
             const result = await client.set(key, value, 'PX', ttlMs, 'NX');
@@ -67,7 +71,7 @@ export function createIoRedisAdapter(client: IoRedisClientLike, options: IoRedis
         },
     };
 
-    if (options.optimized !== false && !isClusterClient(client) && client.script && client.evalsha) {
+    if (options.optimized !== false && !clusterClient && client.script && client.evalsha) {
         adapter.optimized = createOptimizedRedisPrimitives({
             load: async (source) => String(await client.script!('LOAD', source)),
             evalSha: (sha, keys, args) => client.evalsha!(sha, keys.length, ...keys, ...args),

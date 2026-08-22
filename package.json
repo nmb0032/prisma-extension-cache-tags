@@ -1,7 +1,7 @@
 {
     "name": "prisma-extension-cache-tags",
     "version": "0.0.0",
-    "description": "Redis caching for Prisma with automatic, generational tag invalidation. O(1) invalidation, no SCAN, transaction-safe.",
+    "description": "Redis caching for Prisma with automatic, generational tag invalidation. O(tags), independent of cache keyspace size, no SCAN, transaction-safe.",
     "keywords": [
         "prisma",
         "prisma-extension",

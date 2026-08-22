@@ -72,4 +72,34 @@ describe('ioredis adapter', () => {
 
         expect(createIoRedisAdapter(client).optimized).toBeUndefined();
     });
+
+    test('reads Cluster tag versions with ordered per-key GETs instead of MGET', async () => {
+        const values = new Map([
+            ['tag:a', '7'],
+            ['tag:b', null],
+            ['tag:c', '9'],
+        ]);
+        const get = vi.fn(async (key: string) => values.get(key) ?? null);
+        const mget = vi.fn(() => {
+            throw new Error('Cluster MGET must not be used');
+        });
+        const client: IoRedisClientLike = {
+            isCluster: true,
+            get,
+            set: vi.fn(),
+            del: vi.fn(),
+            incrby: vi.fn(),
+            expire: vi.fn(),
+            mget,
+            eval: vi.fn(),
+        };
+
+        const adapter = createIoRedisAdapter(client);
+
+        await expect(adapter.mgetString(['tag:a', 'tag:b', 'tag:c'])).resolves.toEqual(['7', null, '9']);
+        expect(get).toHaveBeenNthCalledWith(1, 'tag:a');
+        expect(get).toHaveBeenNthCalledWith(2, 'tag:b');
+        expect(get).toHaveBeenNthCalledWith(3, 'tag:c');
+        expect(mget).not.toHaveBeenCalled();
+    });
 });

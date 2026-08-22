@@ -91,7 +91,9 @@ function printBenchmarkReport(profile: BenchmarkProfileName, metrics: BenchmarkM
 }
 
 function printContentionReport(result: ContentionBenchmarkResult): void {
-    console.log(`Cold-key contention (${result.contenders} contenders, ${result.rounds} rounds):`);
+    console.log(
+        `Cold-key contention (${result.contenders} independent Prisma clients sharing one Redis connection, ${result.rounds} rounds):`,
+    );
     console.log(`Database queries per round: ${result.databaseQueriesPerRound.join(', ')}`);
     console.table([
         {
@@ -135,7 +137,7 @@ interface RedisCommandProbeReport {
     multiTagInvalidation: RedisCommandPhaseMeasurement;
 }
 
-async function runRedisCommandProbes(fixture: BenchmarkFixture): Promise<RedisCommandProbeReport> {
+async function runRedisCommandProbes(fixture: BenchmarkFixture, metrics: BenchmarkMetrics): Promise<RedisCommandProbeReport> {
     const client = fixture.clients[0];
     const widget = fixture.readCorpus.widgets[0];
     if (client === undefined || widget === undefined) {
@@ -143,40 +145,86 @@ async function runRedisCommandProbes(fixture: BenchmarkFixture): Promise<RedisCo
     }
 
     await deleteRedisNamespace(fixture.redis, fixture.keyPrefix);
-    await client.widget.findUnique({
+    resetProbeState(fixture, metrics);
+    const primed = await client.widget.findUnique({
         where: { id: widget.id },
         cache: { ttlSeconds: 300 },
     });
+    if (primed === null || primed === undefined) {
+        throw new Error('Warm-read probe prime returned no result');
+    }
+    assertProbeState(fixture, metrics, 'warm-read probe prime', { cacheHits: 0, cacheMisses: 1, databaseQueries: 1 });
+
+    resetProbeState(fixture, metrics);
     const warmRead = await measureRedisCommandPhase(fixture.redis, async () => {
         await client.widget.findUnique({
             where: { id: widget.id },
             cache: { ttlSeconds: 300 },
         });
     });
+    assertProbeState(fixture, metrics, 'warm-read probe', { cacheHits: 1, cacheMisses: 0, databaseQueries: 0 });
 
     await deleteRedisNamespace(fixture.redis, fixture.keyPrefix);
+    resetProbeState(fixture, metrics);
     const coldRead = await measureRedisCommandPhase(fixture.redis, async () => {
         await client.widget.findUnique({
             where: { id: widget.id },
             cache: { ttlSeconds: 300 },
         });
     });
+    assertProbeState(fixture, metrics, 'cold-read probe', { cacheHits: 0, cacheMisses: 1, databaseQueries: 1 });
 
+    resetProbeState(fixture, metrics);
     const write = await measureRedisCommandPhase(fixture.redis, async () => {
         await client.widget.update({
             where: { id: widget.id },
             data: { name: `${widget.initialName}:command-probe` },
         });
     });
+    assertProbeState(fixture, metrics, 'write probe', { cacheHits: 0, cacheMisses: 0, databaseQueries: 1 });
 
+    resetProbeState(fixture, metrics);
     const multiTagInvalidation = await measureRedisCommandPhase(fixture.redis, async () => {
         await client.widget.updateMany({
             where: { tenantId: { in: fixture.tenantIds } },
             data: { name: `${widget.initialName}:multi-tag-probe` },
         });
     });
+    assertProbeState(fixture, metrics, 'multi-tag invalidation probe', { cacheHits: 0, cacheMisses: 0, databaseQueries: 1 });
 
     return { warmRead, coldRead, write, multiTagInvalidation };
+}
+
+function resetProbeState(fixture: BenchmarkFixture, metrics: BenchmarkMetrics): void {
+    metrics.reset();
+    for (const queryCounter of fixture.queryCounters) {
+        queryCounter.reset();
+    }
+}
+
+function assertProbeState(
+    fixture: BenchmarkFixture,
+    metrics: BenchmarkMetrics,
+    probe: string,
+    expected: { cacheHits: number; cacheMisses: number; databaseQueries: number },
+): void {
+    const summary = metrics.summarize(1);
+    const observed = {
+        cacheHits: summary.cacheHits,
+        cacheMisses: summary.cacheMisses,
+        databaseQueries: fixture.queryCounters.reduce((total, counter) => total + counter.total, 0),
+    };
+    if (
+        observed.cacheHits !== expected.cacheHits ||
+        observed.cacheMisses !== expected.cacheMisses ||
+        observed.databaseQueries !== expected.databaseQueries
+    ) {
+        throw new Error(
+            `${probe} invariant failed: expected cache hits=${expected.cacheHits}, cache misses=${expected.cacheMisses}, ` +
+                `database queries=${expected.databaseQueries}; observed cache hits=${observed.cacheHits}, ` +
+                `cache misses=${observed.cacheMisses}, database queries=${observed.databaseQueries}`,
+        );
+    }
 }
 
 function printRedisCommandProbeReport(report: RedisCommandProbeReport): void {
@@ -279,7 +327,7 @@ async function main(): Promise<void> {
             printPreservedResources(fixture);
         }
 
-        commandProbes = await runRedisCommandProbes(fixture);
+        commandProbes = await runRedisCommandProbes(fixture, metrics);
         printRedisCommandProbeReport(commandProbes);
 
         const comparison = await runReadOnlyComparison(fixture, metrics, workload);

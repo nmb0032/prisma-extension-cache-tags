@@ -265,7 +265,10 @@ export interface CacheTagsConfig {
     cacheEmpty?: boolean;
     /** Bump to invalidate every cache entry after a breaking code change (default: 1) */
     schemaVersion?: number;
-    /** Maximum number of tags included in a cached read key (default: 30). Never limits write invalidation. */
+    /**
+     * Maximum number of tags included in a cached read key (default: 30). Never limits write invalidation.
+     * Tenant-precise reads that exceed the limit bypass caching rather than dropping invalidation tags.
+     */
     maxTagsPerQuery?: number;
     /** Default stampede protection behaviour */
     stampede?: CacheStampedeOptions;
@@ -321,6 +324,8 @@ export interface ResolvedCacheTags {
     tags: string[];
     tenantIds: string[];
     entityIds: string[];
+    cacheable?: boolean;
+    bypassReason?: 'tenant-tag-limit';
 }
 
 /**

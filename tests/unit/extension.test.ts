@@ -1024,6 +1024,76 @@ describe('handleWrite', () => {
         expect(readQuery).toHaveBeenCalledTimes(1);
     });
 
+    test('bypasses an over-cap tenant-precise read so a tail-tenant write cannot leave stale data reachable', async () => {
+        const tenantIds = Array.from({ length: 20 }, (_, index) => `t${index}`);
+        const entityIds = Array.from({ length: 20 }, (_, index) => `w${index}`);
+        const onCacheEvent = vi.fn();
+        const warn = vi.fn();
+        const config = normalizeConfig({
+            tenantKeys: ['tenantId'],
+            tenantPrecision: true,
+            maxTagsPerQuery: 5,
+            metrics: { onCacheEvent },
+            logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
+        });
+        const args = {
+            where: {
+                tenantId: { in: tenantIds },
+                id: { in: entityIds },
+            },
+        };
+        const readQuery = vi
+            .fn()
+            .mockResolvedValueOnce([{ id: 'w19', tenantId: 't19', name: 'initial' }])
+            .mockResolvedValueOnce([{ id: 'w19', tenantId: 't19', name: 'updated' }]);
+        const readParams = {
+            model: 'Widget',
+            operation: 'findMany',
+            args,
+            cleanedArgs: args,
+            query: readQuery,
+            cacheOptions: { ttlSeconds: 60 },
+            config,
+            redisAdapter: redis,
+        };
+
+        await expect(readThroughCache(readParams)).resolves.toEqual([{ id: 'w19', tenantId: 't19', name: 'initial' }]);
+        await handleWrite({
+            model: 'Widget',
+            operation: 'update',
+            args: { where: { tenantId: 't19', id: 'w19' }, data: { name: 'updated' } },
+            cleanedArgs: { where: { tenantId: 't19', id: 'w19' }, data: { name: 'updated' } },
+            query: vi.fn().mockResolvedValue({ id: 'w19', tenantId: 't19', name: 'updated' }),
+            cacheOptions: undefined,
+            config,
+            redisAdapter: redis,
+        });
+        await expect(readThroughCache(readParams)).resolves.toEqual([{ id: 'w19', tenantId: 't19', name: 'updated' }]);
+
+        expect(readQuery).toHaveBeenCalledTimes(2);
+        expect([...redis.store.keys()].some((key) => key.includes(':qry:'))).toBe(false);
+        expect(onCacheEvent).toHaveBeenCalledTimes(2);
+        expect(onCacheEvent).toHaveBeenNthCalledWith(1, {
+            model: 'Widget',
+            operation: 'findMany',
+            result: 'bypass',
+            path: 'bypass',
+            reason: 'tenant-tag-limit',
+        });
+        expect(onCacheEvent).toHaveBeenNthCalledWith(2, {
+            model: 'Widget',
+            operation: 'findMany',
+            result: 'bypass',
+            path: 'bypass',
+            reason: 'tenant-tag-limit',
+        });
+        expect(warn).toHaveBeenCalledWith(
+            { model: 'Widget', operation: 'findMany', reason: 'tenant-tag-limit' },
+            'Cache read bypassed safely',
+        );
+        expect(warn.mock.calls.flat()).not.toContain(args);
+    });
+
     test('a write to an unrelated tenant invalidates under the safe default', async () => {
         const config = normalizeConfig({ tenantKeys: ['tenantId'] });
         const readQuery = vi.fn().mockResolvedValue([{ id: 'w1' }]);

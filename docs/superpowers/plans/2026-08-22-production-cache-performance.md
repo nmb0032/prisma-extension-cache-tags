@@ -20,7 +20,7 @@
 - Cache key and wire format v2 intentionally abandon v1 entries; no migration or legacy adapter layer.
 - Remove `hash-object`; add no replacement runtime dependency.
 - Performance values are informational and never hard CI thresholds.
-- Execution-model override: every task uses a fresh GPT-5.6 SOL agent at maximum reasoning effort, following the user's latest direction after the spec was approved.
+- Every implementation task uses a fresh GPT-5.6 Luna agent at maximum reasoning effort.
 - Every task follows TDD with assertion-level RED evidence, commits its work, and writes an ignored stage report.
 - Run service-backed commands with `TEST_DATABASE_URL=postgresql://cachetags:cachetags@localhost:5433/cachetags` and `TEST_REDIS_URL=redis://localhost:6380`.
 - Do not modify, stage, revert, or overwrite uncommitted changes in the original main checkout, especially `src/invalidation.ts` and `tests/load/invalidation-scaling.ts`.
@@ -506,7 +506,7 @@ expect(buildVersionedCacheKey('prismaCacheTags:v2:qry:Widget:findMany:abc', '0.2
 
 - [ ] **Step 8: Implement v2 key preparation and fallback generation**
 
-`prepareCacheKey` hashes `{ model, operation, args: cleanedArgs, schemaVersion }` once for normal reads. For custom keys it hashes `{ key: customKey, schemaVersion }` and uses the `custom` namespace. Tags are already normalized and map directly to ordered tag-version keys. The fallback performs `mgetString`, creates the version token, and appends it to `baseKey`.
+`prepareCacheKey` hashes `{ model, operation, args: cleanedArgs, schemaVersion }` once for normal reads. For custom keys it hashes `{ key: customKey, model, operation, args: cleanedArgs, schemaVersion }` and uses the `custom` namespace. Tags are already normalized and map directly to ordered tag-version keys. The fallback performs `mgetString`, creates the version token, and appends it to `baseKey`.
 
 Set `DEFAULT_CONFIG.keyPrefix` to `prismaCacheTags:v2`.
 

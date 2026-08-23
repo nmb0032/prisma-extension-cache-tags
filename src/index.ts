@@ -6,6 +6,7 @@ export { withCacheInvalidation } from './invalidation';
 export { buildVersionedCacheKey, createVersionToken, prepareCacheKey } from './keys';
 export { createOptimizedRedisPrimitives } from './optimized';
 export { analyzePrimaryScope, analyzeReadTags } from './read-analysis';
+export { analyzeWriteTags } from './write-analysis';
 export { resolveModelScopes, serializeScope } from './scope-resolution';
 export { deserializeCacheEnvelope, matchesCacheIdentity, serializeCacheEnvelope } from './serialization';
 export type {
@@ -41,4 +42,5 @@ export type {
     ReadAnalysis,
     ReadDependency,
     ReadDependencyResolver,
+    WriteAnalysis,
 } from './types';

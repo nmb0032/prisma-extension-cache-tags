@@ -76,6 +76,13 @@ export interface ReadAnalysis {
     bypassReason?: CacheBypassReason;
 }
 
+export interface WriteAnalysis {
+    tags: string[];
+    changedModels: string[];
+    tenantScope: string[];
+    globalFallbackModels: string[];
+}
+
 /**
  * Redis adapter interface for cache operations
  *

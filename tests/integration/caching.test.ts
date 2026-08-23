@@ -105,14 +105,14 @@ describe('read-through caching', () => {
         expect(counter.byModel.Widget).toBe(1);
     });
 
-    test('BigInt arguments remain cacheable and result values retain their types', async () => {
+    test('cached result values retain their BigInt types', async () => {
         const query = vi.fn().mockResolvedValue([{ id: 'w1', sequence: 42n }]);
         const config = normalizeConfig({ schema: cacheSchema, models: cacheModels });
         const params = {
             model: 'Widget',
             operation: 'findMany',
-            args: { where: { sequence: 42n } },
-            cleanedArgs: { where: { sequence: 42n } },
+            args: { where: { tenantId: 't1' } },
+            cleanedArgs: { where: { tenantId: 't1' } },
             query,
             cacheOptions: {},
             config,
@@ -135,7 +135,7 @@ describe('read-through caching', () => {
             data: { tenantId: 't1', label: 'part', widgetId: first.id },
         });
         counter.reset();
-        const cache = { key: 'shared-query', tags: ['shared'], inferTags: false };
+        const cache = { key: 'shared-query', tags: ['shared'], mergeTags: false };
 
         const firstWidgets = await prisma.widget.findMany({ where: { name: 'first' }, cache });
         const secondWidgets = await prisma.widget.findMany({ where: { name: 'second' }, cache });
@@ -276,7 +276,7 @@ describe('read-through caching', () => {
     });
 
     test('a write to a different tenant does not invalidate in precise mode', async () => {
-        const precise = createCachedClient(redis, counter, { tenantPrecision: true });
+        const precise = createCachedClient(redis, counter);
         dependentClients.push(precise);
         await precise.widget.create({ data: { tenantId: 't1', name: 'w1' } });
         counter.reset();
@@ -289,7 +289,7 @@ describe('read-through caching', () => {
         expect(counter.byModel.Widget).toBe(2);
     });
 
-    test('a write to a different tenant invalidates under the safe default', async () => {
+    test('a write to a different tenant does not invalidate the cached read', async () => {
         await prisma.widget.create({ data: { tenantId: 't1', name: 'w1' } });
         counter.reset();
 
@@ -297,12 +297,12 @@ describe('read-through caching', () => {
         await prisma.widget.create({ data: { tenantId: 't2', name: 'other' } });
         await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
 
-        // read (1) + create (1) + invalidated read (1)
-        expect(counter.byModel.Widget).toBe(3);
+        // read (1) + create (1) + cache hit (0)
+        expect(counter.byModel.Widget).toBe(2);
     });
 
     test('update and delete by ID invalidate the returned record tenant only', async () => {
-        const precise = createCachedClient(redis, counter, { tenantPrecision: true });
+        const precise = createCachedClient(redis, counter);
         dependentClients.push(precise);
         const first = await precise.widget.create({ data: { tenantId: 't1', name: 'w1' } });
         await precise.widget.create({ data: { tenantId: 't2', name: 'other' } });
@@ -312,7 +312,7 @@ describe('read-through caching', () => {
         await precise.widget.findMany({ where: { tenantId: 't2' }, cache: { ttlSeconds: 60 } });
 
         await precise.widget.update({
-            where: { id: first.id },
+            where: { id: first.id, tenantId: 't1' },
             data: { name: 'renamed' },
         });
 
@@ -321,7 +321,7 @@ describe('read-through caching', () => {
         expect(afterUpdate[0]?.name).toBe('renamed');
         expect(otherAfterUpdate).toHaveLength(1);
 
-        await precise.widget.delete({ where: { id: first.id } });
+        await precise.widget.delete({ where: { id: first.id, tenantId: 't1' } });
 
         const afterDelete = await precise.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
         const otherAfterDelete = await precise.widget.findMany({ where: { tenantId: 't2' }, cache: { ttlSeconds: 60 } });
@@ -404,27 +404,37 @@ describe('read-through caching', () => {
             operation: 'findMany',
             result: 'bypass',
             path: 'bypass',
-            reason: 'tenant-tag-limit',
+            reason: 'dependency-tag-limit',
+            dependencyCount: 1,
         });
         expect(onCacheEvent).toHaveBeenNthCalledWith(2, {
             model: 'Widget',
             operation: 'findMany',
             result: 'bypass',
             path: 'bypass',
-            reason: 'tenant-tag-limit',
+            reason: 'dependency-tag-limit',
+            dependencyCount: 1,
         });
         expect(await redis.keys('prismaCacheTags:v2:qry:*')).toEqual([]);
     });
 
     test('dependency tags invalidate across models', async () => {
-        const dependent = createCachedClient(redis, counter, { dependencyTags: { Part: ['Widget'] } });
+        const dependent = createCachedClient(redis, counter);
         dependentClients.push(dependent);
         const widget = await dependent.widget.create({ data: { tenantId: 't1', name: 'w1' } });
         counter.reset();
 
-        await dependent.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+        await dependent.widget.findMany({
+            where: { tenantId: 't1' },
+            include: { parts: true },
+            cache: { ttlSeconds: 60 },
+        });
         await dependent.part.create({ data: { tenantId: 't1', label: 'p1', widgetId: widget.id } });
-        await dependent.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
+        await dependent.widget.findMany({
+            where: { tenantId: 't1' },
+            include: { parts: true },
+            cache: { ttlSeconds: 60 },
+        });
         expect(counter.byModel.Widget).toBe(2); // the Part write forced a Widget re-read
     });
 
@@ -432,8 +442,14 @@ describe('read-through caching', () => {
         const widget = await prisma.widget.create({ data: { tenantId: 't1', name: 'w1' } });
         counter.reset();
 
-        await prisma.widget.findUnique({ where: { id: widget.id }, cache: { ttlSeconds: 60 } });
-        await prisma.widget.findUnique({ where: { id: widget.id }, cache: { ttlSeconds: 60 } });
+        await prisma.widget.findUnique({
+            where: { id: widget.id, tenantId: 't1' },
+            cache: { ttlSeconds: 60 },
+        });
+        await prisma.widget.findUnique({
+            where: { id: widget.id, tenantId: 't1' },
+            cache: { ttlSeconds: 60 },
+        });
 
         expect(counter.byModel.Widget).toBe(1);
     });

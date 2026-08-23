@@ -16,16 +16,53 @@ export async function createRedis() {
 export interface QueryCounter {
     total: number;
     byModel: Record<string, number>;
+    byQuery?: Record<string, number>;
     reset(): void;
 }
 
-export function createQueryCounter(): QueryCounter {
+export interface DetailedQueryCounter extends QueryCounter {
+    byQuery: Record<string, number>;
+    count(model: string, operation: string, args: unknown): number;
+}
+
+function stableQueryValue(value: unknown): string {
+    if (value === null) {
+        return 'null';
+    }
+    if (value === undefined) {
+        return 'undefined';
+    }
+    if (typeof value === 'bigint') {
+        return `${value}n`;
+    }
+    if (Array.isArray(value)) {
+        return `[${value.map(stableQueryValue).join(',')}]`;
+    }
+    if (typeof value === 'object') {
+        const entries = Object.entries(value as Record<string, unknown>)
+            .filter(([key]) => key !== 'cache')
+            .sort(([left], [right]) => left.localeCompare(right));
+        return `{${entries.map(([key, child]) => `${key}:${stableQueryValue(child)}`).join(',')}}`;
+    }
+    return JSON.stringify(value);
+}
+
+export function queryCounterKey(model: string, operation: string, args: unknown): string {
+    return `${model}:${operation}:${stableQueryValue(args)}`;
+}
+
+export function createQueryCounter(): DetailedQueryCounter {
     return {
         total: 0,
         byModel: {},
+        byQuery: {},
         reset() {
             this.total = 0;
             this.byModel = {};
+            this.byQuery = {};
+        },
+        count(model, operation, args) {
+            return this.byQuery[queryCounterKey(model, operation, args)] ?? 0;
         },
     };
 }
@@ -52,10 +89,13 @@ export function createCachedClient(
     return cached.$extends({
         name: 'query-counter',
         query: {
-            $allOperations({ model, args, query }) {
+            $allOperations({ model, operation, args, query }) {
                 counter.total += 1;
                 if (model) {
                     counter.byModel[model] = (counter.byModel[model] ?? 0) + 1;
+                    const queryKey = queryCounterKey(model, operation, args);
+                    counter.byQuery ??= {};
+                    counter.byQuery[queryKey] = (counter.byQuery[queryKey] ?? 0) + 1;
                 }
                 return query(args);
             },

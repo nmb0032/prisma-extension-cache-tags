@@ -27,5 +27,7 @@ describe('public api', () => {
         expect('readThroughCache' in api).toBe(false);
         expect('handleWrite' in api).toBe(false);
         expect('bumpTagVersions' in api).toBe(false);
+        expect('generatorProtocol' in api).toBe(false);
+        expect('onManifest' in api).toBe(false);
     });
 });

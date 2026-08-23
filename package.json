@@ -112,6 +112,7 @@
         }
     },
     "devDependencies": {
+        "@arethetypeswrong/cli": "0.18.5",
         "@prisma/adapter-pg": "7.9.1",
         "@prisma/client": "7.9.1",
         "@types/node": "^24.7.2",
@@ -119,6 +120,7 @@
         "eslint": "^9.39.5",
         "ioredis": "^6.0.0",
         "prisma": "7.9.1",
+        "publint": "0.3.24",
         "redis": "^6.2.1",
         "tsup": "^8.5.1",
         "tsx": "^4.19.0",

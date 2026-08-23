@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { GeneratorOptions } from '@prisma/generator-helper';
 import { buildCacheSchemaDescriptor } from '../../src/generator/descriptor';
+import { generatorProtocol } from '../../src/generator/protocol';
 import { renderCacheSchemaModule, writeGeneratedCacheSchema } from '../../src/generator/render';
 import type { CacheSchemaDescriptor } from '../../src';
 
@@ -364,5 +365,25 @@ describe('renderCacheSchemaModule', () => {
         } finally {
             await rm(output, { recursive: true, force: true });
         }
+    });
+});
+
+describe('generator protocol', () => {
+    test('returns the Prisma generator manifest', () => {
+        expect(generatorProtocol.onManifest()).toEqual({
+            defaultOutput: './generated/cache-tags',
+            prettyName: 'Prisma Cache Tags Schema Generator',
+            requiresEngines: [],
+        });
+    });
+
+    test('rejects generation when no output path is provided', async () => {
+        const options = {
+            generator: { output: null },
+        } as unknown as GeneratorOptions;
+
+        await expect(generatorProtocol.onGenerate(options)).rejects.toThrow(
+            'prisma-cache-tags-generator requires an output path',
+        );
     });
 });

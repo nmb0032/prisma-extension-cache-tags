@@ -1,14 +1,14 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 
 const repoRoot = process.cwd();
 
-function run(command: string, args: string[], cwd: string, showOutput = false): void {
+function run(command: string, args: string[], cwd: string, showOutput = false, env?: NodeJS.ProcessEnv): void {
     execFileSync(command, args, {
         cwd,
         encoding: 'utf8',
+        env: env === undefined ? process.env : { ...process.env, ...env },
         stdio: showOutput ? 'inherit' : ['ignore', 'pipe', 'inherit'],
     });
 }
@@ -28,11 +28,24 @@ function main(): void {
             throw new Error('npm pack produced no tarball');
         }
 
-        scratch = mkdtempSync(join(tmpdir(), 'cache-tags-e2e-'));
+        scratch = join(repoRoot, `.cache-tags-e2e-${process.pid}`);
+        rmSync(scratch, { recursive: true, force: true });
+        mkdirSync(scratch, { recursive: true });
         console.log(`Installing into ${scratch}...`);
 
         writeFileSync(join(scratch, 'package.json'), JSON.stringify({ name: 'e2e-consumer', version: '1.0.0', private: true }, null, 2));
-        run('npm', ['install', join(repoRoot, tarball), '--no-audit', '--no-fund'], scratch);
+        run('npm', ['install', join(repoRoot, tarball), '--legacy-peer-deps', '--no-audit', '--no-fund'], scratch);
+
+        const generatorBinary = join(scratch, 'node_modules', '.bin', 'prisma-cache-tags-generator');
+        console.log('Verifying the installed generator binary...');
+        if (!existsSync(generatorBinary)) {
+            throw new Error('prisma-cache-tags-generator binary is missing from the installed package');
+        }
+        try {
+            accessSync(generatorBinary, constants.X_OK);
+        } catch {
+            throw new Error('prisma-cache-tags-generator binary is not executable');
+        }
 
         console.log('Verifying CommonJS require()...');
         run(
@@ -41,7 +54,9 @@ function main(): void {
                 '-e',
                 "const m = require('prisma-extension-cache-tags');" +
                     "if (typeof m.createCacheTagsExtension !== 'function') { throw new Error('createCacheTagsExtension missing from CJS build'); }" +
-                    "if (typeof m.createCacheTags.forScope !== 'function') { throw new Error('createCacheTags missing from CJS build'); }",
+                    "if (typeof m.createCacheTags.forScope !== 'function') { throw new Error('createCacheTags missing from CJS build'); }" +
+                    "if (typeof m.invalidateScope !== 'function') { throw new Error('invalidateScope missing from CJS build'); }" +
+                    "if ('generatorProtocol' in m || typeof m.generator === 'function') { throw new Error('generator internals leaked from CJS root'); }",
             ],
             scratch,
         );
@@ -54,7 +69,9 @@ function main(): void {
                 '-e',
                 "const m = await import('prisma-extension-cache-tags');" +
                     "if (typeof m.createCacheTagsExtension !== 'function') { throw new Error('createCacheTagsExtension missing from ESM build'); }" +
-                    "if (typeof m.createCacheTags.forScope !== 'function') { throw new Error('createCacheTags missing from ESM build'); }",
+                    "if (typeof m.createCacheTags.forScope !== 'function') { throw new Error('createCacheTags missing from ESM build'); }" +
+                    "if (typeof m.invalidateScope !== 'function') { throw new Error('invalidateScope missing from ESM build'); }" +
+                    "if ('generatorProtocol' in m || typeof m.generator === 'function') { throw new Error('generator internals leaked from ESM root'); }",
             ],
             scratch,
         );
@@ -72,13 +89,54 @@ function main(): void {
             scratch,
         );
 
+        writeFileSync(
+            join(scratch, 'schema.prisma'),
+            `generator cacheTags {
+  provider = "prisma-cache-tags-generator"
+  output   = "./generated/cache-tags"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model WorkOrder {
+  id          String    @id
+  equipmentId String
+  equipment   Equipment @relation(fields: [equipmentId], references: [id])
+}
+
+model Equipment {
+  id         String      @id
+  workOrders WorkOrder[]
+}
+`,
+        );
+        console.log('Generating the packaged cache schema descriptor...');
+        run(
+            join(repoRoot, 'node_modules', '.bin', 'prisma'),
+            ['generate', '--schema', join(scratch, 'schema.prisma')],
+            scratch,
+            true,
+            { PATH: `${join(scratch, 'node_modules', '.bin')}${delimiter}${process.env.PATH ?? ''}` },
+        );
+
+        const generatedDescriptor = join(scratch, 'generated', 'cache-tags', 'index.ts');
+        if (!existsSync(generatedDescriptor)) {
+            throw new Error(`Prisma generator did not create ${generatedDescriptor}`);
+        }
+        const generatedSource = readFileSync(generatedDescriptor, 'utf8');
+        if (!generatedSource.includes('"equipment"') || !generatedSource.includes('"target": "Equipment"')) {
+            throw new Error('Generated descriptor is missing the WorkOrder equipment → Equipment relation');
+        }
+
         console.log('Checking package exports metadata with publint...');
-        run('npx', ['--yes', 'publint', join(repoRoot, tarball)], repoRoot, true);
+        run('pnpm', ['exec', 'publint', join(repoRoot, tarball)], repoRoot, true);
 
         console.log('Checking type resolution with are-the-types-wrong...');
         run(
-            'npx',
-            ['--yes', '@arethetypeswrong/cli', join(repoRoot, tarball), '--pack', '--ignore-rules', 'cjs-resolves-to-esm'],
+            'pnpm',
+            ['exec', 'attw', join(repoRoot, tarball), '--pack', '--ignore-rules', 'cjs-resolves-to-esm'],
             repoRoot,
             true,
         );

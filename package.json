@@ -89,6 +89,7 @@
         "test:unit": "vitest run --project unit",
         "test:integration": "vitest run --project integration",
         "test:benchmark:invalidation": "tsx tests/load/invalidation-scaling.ts",
+        "test:benchmark:dependencies": "tsx tests/load/dependency-invalidation.ts",
         "test:benchmark:load": "tsx tests/load/load-benchmark.ts",
         "test:e2e": "tsx tests/e2e/package-smoke.ts",
         "db:up": "docker compose up -d --wait",

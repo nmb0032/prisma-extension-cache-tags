@@ -4,6 +4,10 @@ The `tests/load` directory contains two benchmarks with different purposes:
 
 - `test:benchmark:invalidation` is a synthetic Redis-only keyspace-scaling
   microbenchmark. It does not exercise Prisma or PostgreSQL.
+- `test:benchmark:dependencies` is a deterministic dependency-invalidation
+  fanout benchmark. It uses the real read and write tag analyzers for
+  representative primary-only and relation-dependent subscriptions, then
+  counts synthetic subscriptions by tag intersection.
 - `test:benchmark:load` is a model-backed workload that runs real cached Prisma
   `Widget` and `Part` unique/list/aggregate operations against PostgreSQL and
   Redis. Its shared read corpus also probes distributed cold-list stampede
@@ -39,6 +43,22 @@ command-count measurements.
 The benchmark passes when p50 invalidation latency grows by no more than 2x
 across the 100x keyspace increase. It exits non-zero when that threshold is
 exceeded or when the observed logical `INCR` plus `INCRBY` count is not fixed.
+
+## Dependency invalidation fanout benchmark
+
+Run the deterministic analyzer benchmark:
+
+```bash
+pnpm test:benchmark:dependencies
+```
+
+The representative workload assumes 100 tenants, 20 models per tenant, 50
+queries per model, and two dependent models. It compares the legacy union
+estimate of 5,950 affected subscriptions per write with 150 for query-aware
+subscriptions (approximately 39.67x lower fanout). A 10% cache-reuse estimate
+is also reported for database refills. Normal tenant-scoped publications use
+only the real analyzer's narrow model/entity tags; tenant-root and global
+fallback tags are not counted because normal scoped writes do not publish them.
 
 ## Model-backed load benchmark
 

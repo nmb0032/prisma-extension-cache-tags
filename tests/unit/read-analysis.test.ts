@@ -15,6 +15,7 @@ const schema = {
             },
             primaryKey: ['id'],
             uniqueKeys: [['id'], ['organizationId', 'id']],
+            compoundUniqueKeys: [{ name: 'namedTenantKey', fields: ['organizationId', 'id'] }],
         },
         Equipment: {
             fields: {

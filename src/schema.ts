@@ -22,6 +22,10 @@ export interface CacheModelDescriptor {
     fields: Record<string, CacheFieldDescriptor>;
     primaryKey: readonly string[];
     uniqueKeys: readonly (readonly string[])[];
+    compoundUniqueKeys?: readonly {
+        name: string;
+        fields: readonly string[];
+    }[];
     dbName?: string | null;
 }
 
@@ -87,6 +91,20 @@ function validateSchema(schema: CacheSchemaDescriptor): void {
             )
         ) {
             throw new Error(`Cache model "${modelName}" has invalid key metadata`);
+        }
+        if (
+            Object.prototype.hasOwnProperty.call(descriptor, 'compoundUniqueKeys')
+            && (!Array.isArray(descriptor.compoundUniqueKeys)
+                || !descriptor.compoundUniqueKeys.every(
+                    (key) =>
+                        isRecord(key)
+                        && typeof key.name === 'string'
+                        && Array.isArray(key.fields)
+                        && key.fields.length > 1
+                        && key.fields.every((fieldName) => typeof fieldName === 'string'),
+                ))
+        ) {
+            throw new Error(`Cache model "${modelName}" has invalid compound key metadata`);
         }
         if (
             Object.prototype.hasOwnProperty.call(descriptor, 'dbName') &&

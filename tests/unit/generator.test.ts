@@ -324,6 +324,9 @@ describe('buildCacheSchemaDescriptor', () => {
             ['code', 'organizationId'],
             ['id'],
         ]);
+        expect(workOrder.compoundUniqueKeys).toEqual([
+            { name: 'organizationId_code', fields: ['organizationId', 'code'] },
+        ]);
         expect(membership.uniqueKeys).toEqual([
             ['organizationId', 'userId'],
         ]);

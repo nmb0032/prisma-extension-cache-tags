@@ -52,6 +52,35 @@ function uniqueKeys(model: DatamodelModel, primaryKey: readonly string[]): strin
     return [...deduplicated.values()].sort(compareKeys);
 }
 
+function compoundUniqueKeys(model: DatamodelModel, primaryKey: readonly string[]) {
+    const keys: { name: string; fields: string[] }[] = [];
+    if (primaryKey.length > 1) {
+        keys.push({
+            name: model.primaryKey?.name ?? primaryKey.join('_'),
+            fields: [...primaryKey],
+        });
+    }
+    for (const fields of model.uniqueFields) {
+        if (fields.length > 1) {
+            keys.push({ name: fields.join('_'), fields: [...fields] });
+        }
+    }
+    for (const index of model.uniqueIndexes) {
+        if (index.fields.length > 1) {
+            keys.push({
+                name: index.name ?? index.fields.join('_'),
+                fields: [...index.fields],
+            });
+        }
+    }
+
+    const deduplicated = new Map<string, { name: string; fields: string[] }>();
+    for (const key of keys) {
+        deduplicated.set(key.name, key);
+    }
+    return [...deduplicated.values()].sort((left, right) => compareStrings(left.name, right.name));
+}
+
 function fieldDescriptor(field: DatamodelField): CacheFieldDescriptor {
     const dbName = mappedName(field.dbName);
     if (field.kind === 'object') {
@@ -91,6 +120,9 @@ function modelDescriptor(model: DatamodelModel) {
         fields,
         primaryKey,
         uniqueKeys: uniqueKeys(model, primaryKey),
+        ...(compoundUniqueKeys(model, primaryKey).length > 0
+            ? { compoundUniqueKeys: compoundUniqueKeys(model, primaryKey) }
+            : {}),
         ...(dbName === undefined ? {} : { dbName }),
     };
 }

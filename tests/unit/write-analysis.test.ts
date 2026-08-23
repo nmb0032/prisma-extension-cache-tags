@@ -378,6 +378,27 @@ describe('narrow write publication analysis', () => {
         expect(result.globalFallbackModels).toEqual(['Equipment']);
     });
 
+    test('falls back when an upsert create scope cannot prove the update branch', () => {
+        const result = analyzeWriteTags({
+            model: 'Equipment',
+            operation: 'upsert',
+            args: {
+                where: { id: 'upserted' },
+                create: { id: 'upserted', organizationId: 'org_create' },
+                update: { serial: 'existing' },
+            },
+            result: undefined,
+            context,
+        });
+
+        expect(result.tags).toEqual([
+            'global:model:Equipment',
+            'scope:organization:org_create:entity:Equipment:upserted',
+            'scope:organization:org_create:model:Equipment',
+        ]);
+        expect(result.globalFallbackModels).toEqual(['Equipment']);
+    });
+
     test('resolves logical and compound predicates without using relation tenants', () => {
         const result = analyzeWriteTags({
             model: 'WorkOrder',
@@ -400,6 +421,25 @@ describe('narrow write publication analysis', () => {
         ]);
         expect(result.tenantScope).toEqual(['organization:org_1']);
         expect(result.globalFallbackModels).toEqual([]);
+    });
+
+    test('does not treat arbitrary scalar objects as compound predicates', () => {
+        const result = analyzeWriteTags({
+            model: 'WorkOrder',
+            operation: 'update',
+            args: {
+                where: {
+                    metadata: { organizationId: 'org_fake', number: 'WO:1' },
+                },
+                data: { number: 'WO:updated' },
+            },
+            result: undefined,
+            context,
+        });
+
+        expect(result.tags).toEqual(['global:model:WorkOrder']);
+        expect(result.tenantScope).toEqual([]);
+        expect(result.globalFallbackModels).toEqual(['WorkOrder']);
     });
 
     test('treats connectOrCreate as a nested mutation with conservative fallback', () => {

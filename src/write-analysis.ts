@@ -246,7 +246,14 @@ function processEvidence(
                     newScopes = created;
                     addScopedIdentities(state, modelName, [create], created);
                 }
-                if (createBranchUnknown) {
+                if (
+                    createBranchUnknown
+                    || (
+                        model.scope.kind === 'tenant'
+                        && returned.length === 0
+                        && predicate.length === 0
+                    )
+                ) {
                     markFallback(state, modelName);
                 }
             }

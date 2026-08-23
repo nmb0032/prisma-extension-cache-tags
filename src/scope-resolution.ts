@@ -11,19 +11,34 @@ function scalarString(value: unknown): string | undefined {
     return undefined;
 }
 
+function hasExactFields(value: Record<string, unknown>, fields: readonly string[]): boolean {
+    const ownFields = Object.keys(value);
+    return ownFields.length === fields.length && fields.every((field) => ownFields.includes(field));
+}
+
+function compoundFields(model: CacheModelDescriptor, wrapper: string): readonly string[] | undefined {
+    const generated = model.compoundUniqueKeys?.find((key) => key.name === wrapper);
+    if (generated) {
+        return generated.fields;
+    }
+    return model.uniqueKeys.find(
+        (uniqueKey) => uniqueKey.length > 1 && uniqueKey.join('_') === wrapper,
+    );
+}
+
 function isCompoundScopePredicate(
     model: CacheModelDescriptor,
     tenantField: string,
+    wrapper: string,
     value: unknown,
 ): value is Record<string, unknown> {
     if (!isRecord(value)) {
         return false;
     }
-    return model.uniqueKeys.some((uniqueKey) =>
-        uniqueKey.length > 1
-        && uniqueKey.includes(tenantField)
-        && uniqueKey.every((field) => Object.prototype.hasOwnProperty.call(value, field))
-    );
+    const fields = compoundFields(model, wrapper);
+    return fields !== undefined
+        && fields.includes(tenantField)
+        && hasExactFields(value, fields);
 }
 
 function addTenantValues(value: unknown, scope: { namespace: string }, output: CacheScope[]): void {
@@ -112,7 +127,7 @@ function walkScopes(
         if (
             indexed.scope.kind === 'tenant'
             && !relation
-            && isCompoundScopePredicate(indexed.descriptor, indexed.scope.field, child)
+            && isCompoundScopePredicate(indexed.descriptor, indexed.scope.field, key, child)
         ) {
             walkScopes(model, child, context, output, visited, followRelations);
             continue;

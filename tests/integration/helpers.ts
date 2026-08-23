@@ -3,6 +3,7 @@ import { createNodeRedisAdapter } from '../../src/adapters/node-redis';
 import { createCacheTagsExtension } from '../../src/extension';
 import type { CacheTagsConfig, RedisAdapter } from '../../src/types';
 import { createTestPrismaClient, type TestPrismaClientOptions } from '../fixture/client';
+import { cacheModels, cacheSchema } from '../fixture/cache-schema';
 
 export const REDIS_URL = process.env.TEST_REDIS_URL ?? 'redis://localhost:6380';
 
@@ -32,7 +33,7 @@ export function createQueryCounter(): QueryCounter {
 export function createCachedClient(
     redisClient: Awaited<ReturnType<typeof createRedis>>,
     counter: QueryCounter,
-    config: CacheTagsConfig = {},
+    config: Partial<CacheTagsConfig> & Record<string, unknown> = {},
     prismaOptions: TestPrismaClientOptions = {},
     redisAdapter: RedisAdapter = createNodeRedisAdapter(redisClient),
 ) {
@@ -40,9 +41,10 @@ export function createCachedClient(
 
     const cached = base.$extends(
         createCacheTagsExtension(redisAdapter, {
-            tenantKeys: ['tenantId'],
+            schema: cacheSchema,
+            models: cacheModels,
             ...config,
-        }),
+        } as CacheTagsConfig),
     );
 
     // Counting layer sits closest to the database, so it only sees queries the

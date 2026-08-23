@@ -1,7 +1,7 @@
 import superjson from 'superjson';
-import type { PreparedCacheKey, CachedEnvelopeV2 } from './types';
+import type { PreparedCacheKey, CachedEnvelopeV3 } from './types';
 
-export type { CachedEnvelopeV2 } from './types';
+export type { CachedEnvelopeV3 } from './types';
 
 export class InvalidCacheEnvelopeError extends Error {
     constructor() {
@@ -10,7 +10,7 @@ export class InvalidCacheEnvelopeError extends Error {
     }
 }
 
-function isCacheEnvelope(value: unknown): value is CachedEnvelopeV2 {
+function isCacheEnvelope(value: unknown): value is CachedEnvelopeV3 {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
         return false;
     }
@@ -33,11 +33,11 @@ function isCacheEnvelope(value: unknown): value is CachedEnvelopeV2 {
     return true;
 }
 
-export function serializeCacheEnvelope(envelope: CachedEnvelopeV2): string {
+export function serializeCacheEnvelope(envelope: CachedEnvelopeV3): string {
     return superjson.stringify(envelope);
 }
 
-export function deserializeCacheEnvelope(payload: string): CachedEnvelopeV2 {
+export function deserializeCacheEnvelope(payload: string): CachedEnvelopeV3 {
     let parsed: unknown;
     try {
         parsed = superjson.parse<unknown>(payload);
@@ -52,7 +52,7 @@ export function deserializeCacheEnvelope(payload: string): CachedEnvelopeV2 {
     return parsed;
 }
 
-export function matchesCacheIdentity(envelope: CachedEnvelopeV2, prepared: PreparedCacheKey): boolean {
+export function matchesCacheIdentity(envelope: CachedEnvelopeV3, prepared: PreparedCacheKey): boolean {
     if (!isCacheEnvelope(envelope) || !Array.isArray(prepared.tenantScope)) {
         return false;
     }

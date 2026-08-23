@@ -3,6 +3,8 @@ import { getCacheLockKey } from '../../src/keys';
 import { acquireCacheLock, releaseCacheLock, waitForCachedValue } from '../../src/locks';
 import { noopLogger, noopMetrics } from '../../src/observability';
 import type { NormalizedCacheConfig } from '../../src/types';
+import { createAnalysisContext } from '../../src/schema';
+import { cacheModels, cacheSchema } from '../fixture/cache-schema';
 import { createFakeRedis, type FakeRedis } from './fake-redis';
 
 const config: NormalizedCacheConfig = {
@@ -15,6 +17,7 @@ const config: NormalizedCacheConfig = {
     schemaVersion: 1,
     maxTagsPerQuery: 30,
     stampede: { waitMs: 200, pollMs: 10, lockTtlMs: 5000 },
+    analysis: createAnalysisContext(cacheSchema, cacheModels),
     dependencyTags: {},
     inferTags: true,
     tenantKeys: [],

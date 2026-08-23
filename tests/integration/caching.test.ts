@@ -8,6 +8,7 @@ import { buildVersionedCacheKey, createVersionToken, prepareCacheKey } from '../
 import { resolveCacheTags } from '../../src/tags';
 import { serializeCacheEnvelope } from '../../src/serialization';
 import { REDIS_URL, createCachedClient, createQueryCounter, createRedis } from './helpers';
+import { cacheModels, cacheSchema } from '../fixture/cache-schema';
 
 const redis = await createRedis();
 const ioRedis = new IoRedis(REDIS_URL);
@@ -106,7 +107,7 @@ describe('read-through caching', () => {
 
     test('BigInt arguments remain cacheable and result values retain their types', async () => {
         const query = vi.fn().mockResolvedValue([{ id: 'w1', sequence: 42n }]);
-        const config = normalizeConfig();
+        const config = normalizeConfig({ schema: cacheSchema, models: cacheModels });
         const params = {
             model: 'Widget',
             operation: 'findMany',
@@ -184,7 +185,7 @@ describe('read-through caching', () => {
         await prisma.widget.create({ data: { tenantId: 'tenant-a', name: 'fresh' } });
         counter.reset();
 
-        const config = normalizeConfig({ tenantKeys: ['tenantId'] });
+        const config = normalizeConfig({ schema: cacheSchema, models: cacheModels });
         const cacheOptions = { ttlSeconds: 60 };
         const args = { where: { tenantId: 'tenant-a' } };
         const resolvedTags = resolveCacheTags('Widget', 'findMany', args, cacheOptions, config, false);
@@ -217,7 +218,8 @@ describe('read-through caching', () => {
 
         const onCacheEvent = vi.fn();
         const config = normalizeConfig({
-            tenantKeys: ['tenantId'],
+            schema: cacheSchema,
+            models: cacheModels,
             metrics: { onCacheEvent },
         });
         const cacheOptions = { ttlSeconds: 60 };
@@ -330,7 +332,6 @@ describe('read-through caching', () => {
 
     test('a tenant-precise write invalidates every resolved tenant beyond the cached-read tag limit', async () => {
         const precise = createCachedClient(redis, counter, {
-            tenantPrecision: true,
             maxTagsPerQuery: 5,
         });
         dependentClients.push(precise);
@@ -368,7 +369,6 @@ describe('read-through caching', () => {
     test('bypasses a broad over-cap read so an omitted-tail tenant/entity write cannot stay stale', async () => {
         const onCacheEvent = vi.fn();
         const precise = createCachedClient(redis, counter, {
-            tenantPrecision: true,
             maxTagsPerQuery: 5,
             metrics: { onCacheEvent },
         });

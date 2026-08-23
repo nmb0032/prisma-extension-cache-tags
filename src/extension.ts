@@ -29,6 +29,7 @@ import {
     type RedisAdapter,
     type WriteOperation,
 } from './types';
+import type { CacheSchemaDescriptor } from './schema';
 
 export { normalizeConfig };
 
@@ -555,8 +556,11 @@ export async function handleWrite(params: {
 /**
  * Create the Prisma cache extension.
  */
-export function createCacheTagsExtension(redisAdapter: RedisAdapter, config?: CacheTagsConfig) {
-    const finalConfig = normalizeConfig(config);
+export function createCacheTagsExtension<TSchema extends CacheSchemaDescriptor>(
+    redisAdapter: RedisAdapter,
+    config: CacheTagsConfig<TSchema> | NormalizedCacheConfig<TSchema>,
+) {
+    const finalConfig = 'analysis' in config ? config : normalizeConfig(config);
 
     return Prisma.defineExtension((client) => {
         const extendedClient = client.$extends({

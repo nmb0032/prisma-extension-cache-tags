@@ -22,7 +22,7 @@ export type {
 } from './schema';
 export type {
     CacheBypassReason,
-    CachedEnvelopeV2,
+    CachedEnvelopeV3,
     CacheScriptEvent,
     CacheDependencyResolver,
     CacheEvent,

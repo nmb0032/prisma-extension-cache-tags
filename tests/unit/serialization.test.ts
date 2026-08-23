@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import type { CachedEnvelopeV2 } from '../../src/types';
+import type { CachedEnvelopeV3 } from '../../src/types';
 import { deserializeCacheEnvelope, matchesCacheIdentity, serializeCacheEnvelope } from '../../src/serialization';
 
 describe('serialization', () => {
@@ -34,7 +34,7 @@ describe('serialization', () => {
             value: null,
         };
         const prepared = {
-            baseKey: 'prismaCacheTags:v2:qry:Widget:findMany:hash',
+            baseKey: 'prismaCacheTags:v3:qry:Widget:findMany:hash',
             tagVersionKeys: [],
             identity: 'identity',
             tenantScope: ['tenant-a', 'tenant-b'],
@@ -59,15 +59,15 @@ describe('serialization', () => {
         ['a malformed SuperJSON payload', 'not-superjson'],
         [
             'an envelope missing value',
-            serializeCacheEnvelope({ identity: 'identity', tenantScope: [] } as unknown as CachedEnvelopeV2),
+            serializeCacheEnvelope({ identity: 'identity', tenantScope: [] } as unknown as CachedEnvelopeV3),
         ],
         [
             'an envelope with a non-string identity',
-            serializeCacheEnvelope({ identity: 42, tenantScope: [], value: null } as unknown as CachedEnvelopeV2),
+            serializeCacheEnvelope({ identity: 42, tenantScope: [], value: null } as unknown as CachedEnvelopeV3),
         ],
         [
             'an envelope with a non-string tenant scope entry',
-            serializeCacheEnvelope({ identity: 'identity', tenantScope: ['tenant-a', 42], value: null } as unknown as CachedEnvelopeV2),
+            serializeCacheEnvelope({ identity: 'identity', tenantScope: ['tenant-a', 42], value: null } as unknown as CachedEnvelopeV3),
         ],
     ])('rejects %s at the deserialization boundary', (_description, payload) => {
         expect(() => deserializeCacheEnvelope(payload)).toThrow(/invalid cache envelope/i);
@@ -81,7 +81,7 @@ describe('serialization', () => {
         };
         const restored = deserializeCacheEnvelope(serializeCacheEnvelope(envelope));
         const prepared = {
-            baseKey: 'prismaCacheTags:v2:qry:Widget:findMany:hash',
+            baseKey: 'prismaCacheTags:v3:qry:Widget:findMany:hash',
             tagVersionKeys: [],
             identity: 'identity',
             tenantScope: [],
@@ -94,7 +94,7 @@ describe('serialization', () => {
 
     test('does not treat an envelope without value as an identity match', () => {
         const prepared = {
-            baseKey: 'prismaCacheTags:v2:qry:Widget:findMany:hash',
+            baseKey: 'prismaCacheTags:v3:qry:Widget:findMany:hash',
             tagVersionKeys: [],
             identity: 'identity',
             tenantScope: [],
@@ -102,7 +102,7 @@ describe('serialization', () => {
 
         expect(
             matchesCacheIdentity(
-                { identity: 'identity', tenantScope: [] } as unknown as CachedEnvelopeV2,
+                { identity: 'identity', tenantScope: [] } as unknown as CachedEnvelopeV3,
                 prepared,
             ),
         ).toBe(false);

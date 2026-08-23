@@ -4,6 +4,7 @@ import { normalizeConfig } from '../../src/config';
 import { createNodeRedisAdapter } from '../../src/adapters/node-redis';
 import { getTagVersionKey } from '../../src/keys';
 import { createCachedClient, createQueryCounter, createRedis } from './helpers';
+import { cacheModels, cacheSchema } from '../fixture/cache-schema';
 
 const redis = await createRedis();
 const counter = createQueryCounter();
@@ -11,7 +12,7 @@ const prisma = createCachedClient(redis, counter);
 const redisAdapter = createNodeRedisAdapter(redis);
 const fallbackCounter = createQueryCounter();
 const fallbackPrisma = createCachedClient(redis, fallbackCounter, {}, {}, createNodeRedisAdapter(redis, { optimized: false }));
-const tagVersionKey = getTagVersionKey('tenant:t1:model:Widget', normalizeConfig({ tenantKeys: ['tenantId'] }));
+const tagVersionKey = getTagVersionKey('tenant:t1:model:Widget', normalizeConfig({ schema: cacheSchema, models: cacheModels }));
 
 function asTransactionBatch(operations: Promise<unknown>[]): Prisma.PrismaPromise<unknown>[] {
     // Query extensions expose Promise at the type level, while Prisma executes these lazy values as a batch.

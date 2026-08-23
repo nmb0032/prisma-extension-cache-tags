@@ -9,6 +9,7 @@ import {
     logError,
     TEST_REDIS_URL,
 } from '../support/service-preflight';
+import { cacheModels, cacheSchema } from '../fixture/cache-schema';
 
 const REDIS_URL = TEST_REDIS_URL;
 const KEYSPACE_SIZES = [1_000, 10_000, 100_000];
@@ -64,7 +65,7 @@ async function main(): Promise<void> {
         }
         connected = true;
 
-        const config = normalizeConfig({ tenantKeys: ['tenantId'] });
+        const config = normalizeConfig({ schema: cacheSchema, models: cacheModels });
         const adapter = createNodeRedisAdapter(client);
         const results: Array<{ keyspace: number; p50: number; p99: number }> = [];
         const logicalIncrementCalls: number[] = [];

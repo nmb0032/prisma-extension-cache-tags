@@ -5,6 +5,7 @@ import { buildVersionedCacheKey, createVersionToken, prepareCacheKey } from '../
 import { acquireCacheLock, releaseCacheLock } from '../../src/locks';
 import { resolveCacheTags } from '../../src/tags';
 import { createCachedClient, createQueryCounter, createRedis } from './helpers';
+import { cacheModels, cacheSchema } from '../fixture/cache-schema';
 
 const redis = await createRedis();
 const counterA = createQueryCounter();
@@ -65,7 +66,7 @@ describe('distributed stampede protection', () => {
         counterB.reset();
 
         const redisAdapter = createNodeRedisAdapter(redis);
-        const config = normalizeConfig({ tenantKeys: ['tenantId'] });
+        const config = normalizeConfig({ schema: cacheSchema, models: cacheModels });
         const args = { where: { tenantId: 't1' } };
         const cacheOptions = { ttlSeconds: 60 };
         const tags = resolveCacheTags('Widget', 'findMany', args, cacheOptions, config, false).tags;

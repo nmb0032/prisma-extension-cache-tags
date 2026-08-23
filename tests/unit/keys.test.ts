@@ -2,6 +2,8 @@ import { describe, expect, test } from 'vitest';
 import { buildVersionedCacheKey, createVersionToken, getCacheLockKey, getTagVersionKey, prepareCacheKey } from '../../src/keys';
 import { noopLogger, noopMetrics } from '../../src/observability';
 import type { NormalizedCacheConfig } from '../../src/types';
+import { createAnalysisContext } from '../../src/schema';
+import { cacheModels, cacheSchema } from '../fixture/cache-schema';
 
 const config: NormalizedCacheConfig = {
     enabled: true,
@@ -13,6 +15,7 @@ const config: NormalizedCacheConfig = {
     schemaVersion: 1,
     maxTagsPerQuery: 30,
     stampede: { waitMs: 1500, pollMs: 50, lockTtlMs: 5000 },
+    analysis: createAnalysisContext(cacheSchema, cacheModels),
     dependencyTags: {},
     inferTags: true,
     tenantKeys: [],

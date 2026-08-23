@@ -5,6 +5,8 @@ import { createCacheTagsExtension, handleWrite, normalizeConfig, readThroughCach
 import { acquireCacheLock, releaseCacheLock } from '../../src/locks';
 import { serializeCacheEnvelope } from '../../src/serialization';
 import { createFakeRedis, type FakeRedis } from './fake-redis';
+import { cacheModels, cacheSchema } from '../fixture/cache-schema';
+import type { NormalizedCacheConfig } from '../../src/types';
 
 let redis: FakeRedis;
 
@@ -12,28 +14,49 @@ beforeEach(() => {
     redis = createFakeRedis();
 });
 
-describe('normalizeConfig', () => {
-    test('applies generic defaults with no KitCompass model graph', () => {
-        const config = normalizeConfig();
+function makeConfig(
+    overrides: Partial<Omit<NormalizedCacheConfig, 'analysis' | 'stampede'>> & {
+        stampede?: Partial<NormalizedCacheConfig['stampede']>;
+    } = {},
+): NormalizedCacheConfig {
+    const base = normalizeConfig({ schema: cacheSchema, models: cacheModels });
+    const { stampede, ...legacyOverrides } = overrides;
+    return {
+        ...base,
+        ...legacyOverrides,
+        stampede: { ...base.stampede, ...stampede },
+        analysis: base.analysis,
+    };
+}
 
-        expect(config.dependencyTags).toEqual({});
-        expect(config.tenantKeys).toEqual([]);
-        expect(config.entityKeys).toEqual(['id']);
-        expect(config.keyPrefix).toBe('prismaCacheTags:v2');
+describe('normalizeConfig', () => {
+    test('applies v3 defaults and builds the analysis context', () => {
+        const config = normalizeConfig({ schema: cacheSchema, models: cacheModels });
+
+        expect(config.keyPrefix).toBe('prismaCacheTags:v3');
+        expect(config.analysis.models.Widget!.scope).toEqual({
+            kind: 'tenant',
+            field: 'tenantId',
+            namespace: 'tenant',
+        });
         expect(config.enabled).toBe(true);
-        expect(config.tenantPrecision).toBe(false);
     });
 
     test('merges nested stampede options rather than replacing them', () => {
-        const config = normalizeConfig({ stampede: { waitMs: 99 } });
+        const config = makeConfig({ stampede: { waitMs: 99 } });
 
         expect(config.stampede.waitMs).toBe(99);
         expect(config.stampede.pollMs).toBe(50);
         expect(config.stampede.lockTtlMs).toBe(5000);
     });
 
-    test('allows tenant precision to be opted into explicitly', () => {
-        expect(normalizeConfig({ tenantPrecision: true }).tenantPrecision).toBe(true);
+    test('rejects malformed schema and model descriptors synchronously', () => {
+        expect(() => normalizeConfig({ schema: { formatVersion: 2, models: {} } as never, models: {} })).toThrow(
+            'Unsupported cache schema format version',
+        );
+        expect(() => normalizeConfig({ schema: cacheSchema, models: { Missing: { tenant: false } } as never })).toThrow(
+            'Configured model "Missing" does not exist in the schema',
+        );
     });
 });
 
@@ -46,7 +69,7 @@ describe('createCacheTagsExtension', () => {
                 return { $transaction: vi.fn() };
             }),
         };
-        const extension = createCacheTagsExtension(redis, { enabled: false });
+        const extension = createCacheTagsExtension(redis, { schema: cacheSchema, models: cacheModels, enabled: false });
         const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);
         const args = { where: { id: 'w1' }, cache: { ttlSeconds: 60 } };
 
@@ -61,7 +84,7 @@ describe('createCacheTagsExtension', () => {
         let operationHandler!: (params: Record<string, unknown>) => Promise<unknown>;
         const error = vi.fn();
         const onCacheEvent = vi.fn();
-        const config = normalizeConfig({
+        const config = makeConfig({
             logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error },
             metrics: { onCacheEvent },
         });
@@ -106,7 +129,7 @@ describe('createCacheTagsExtension', () => {
         const args: Record<string, unknown> = {};
         args.self = args;
         const query = vi.fn().mockResolvedValue([{ id: 'fresh' }]);
-        const config = normalizeConfig({ metrics: { onCacheEvent } });
+        const config = makeConfig({ metrics: { onCacheEvent } });
 
         createCacheTagsExtension(redis, config)(base as never);
         const result = await operationHandler({ model: 'Widget', operation: 'findMany', args: { ...args, cache: {} }, query });
@@ -126,7 +149,7 @@ describe('createCacheTagsExtension', () => {
 describe('readThroughCache', () => {
     test('serves a verified optimized hit without issuing a second value read', async () => {
         const onCacheEvent = vi.fn();
-        const config = normalizeConfig({ metrics: { onCacheEvent } });
+        const config = makeConfig({ metrics: { onCacheEvent } });
         const query = vi.fn().mockResolvedValue([{ id: 'database' }]);
         const preparedKey = prepareCacheKey('Widget', 'findMany', {}, [], [], config);
         const cacheKey = buildVersionedCacheKey(preparedKey.baseKey, '');
@@ -164,7 +187,7 @@ describe('readThroughCache', () => {
     });
 
     test('populates and releases an optimized cold owner atomically', async () => {
-        const config = normalizeConfig();
+        const config = makeConfig();
         const query = vi.fn().mockResolvedValue([{ id: 'database' }]);
         const preparedKey = prepareCacheKey('Widget', 'findMany', {}, [], [], config);
         const cacheKey = buildVersionedCacheKey(preparedKey.baseKey, '');
@@ -201,7 +224,7 @@ describe('readThroughCache', () => {
     });
 
     test('returns the database result when an optimized owner loses population ownership', async () => {
-        const config = normalizeConfig();
+        const config = makeConfig();
         const query = vi.fn().mockResolvedValue({ id: 'database' });
         const preparedKey = prepareCacheKey('Widget', 'findUnique', { where: { id: 'w1' } }, [], [], config);
         const cacheKey = buildVersionedCacheKey(preparedKey.baseKey, '');
@@ -237,7 +260,7 @@ describe('readThroughCache', () => {
     test('emits one lookup failure for malformed optimized replies before using the command fallback', async () => {
         const warn = vi.fn();
         const onScriptEvent = vi.fn();
-        const config = normalizeConfig({
+        const config = makeConfig({
             logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
             metrics: { onCacheEvent: vi.fn(), onScriptEvent },
         });
@@ -276,7 +299,7 @@ describe('readThroughCache', () => {
     test('emits one population failure for malformed optimized replies and releases the owner lock safely', async () => {
         const warn = vi.fn();
         const onScriptEvent = vi.fn();
-        const config = normalizeConfig({
+        const config = makeConfig({
             logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
             metrics: { onCacheEvent: vi.fn(), onScriptEvent },
         });
@@ -315,7 +338,7 @@ describe('readThroughCache', () => {
 
     test('rejects an optimized malformed payload without repopulating that generation', async () => {
         const onCacheEvent = vi.fn();
-        const config = normalizeConfig({ metrics: { onCacheEvent } });
+        const config = makeConfig({ metrics: { onCacheEvent } });
         const query = vi.fn().mockResolvedValue([{ id: 'database' }]);
         const preparedKey = prepareCacheKey('Widget', 'findMany', {}, [], [], config);
         const cacheKey = buildVersionedCacheKey(preparedKey.baseKey, '');
@@ -358,7 +381,7 @@ describe('readThroughCache', () => {
     test('falls back to command reads when the optimized lookup fails and records the script error', async () => {
         const warn = vi.fn();
         const onCacheEvent = vi.fn();
-        const config = normalizeConfig({
+        const config = makeConfig({
             logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
             metrics: { onCacheEvent },
         });
@@ -391,7 +414,7 @@ describe('readThroughCache', () => {
     });
 
     test('misses, calls the query, and populates the cache', async () => {
-        const config = normalizeConfig({ tenantKeys: ['tenantId'] });
+        const config = makeConfig({ tenantKeys: ['tenantId'] });
         const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);
 
         const result = await readThroughCache({
@@ -419,7 +442,7 @@ describe('readThroughCache', () => {
             cleanedArgs: { where: { sequence: 42n } },
             query,
             cacheOptions: {},
-            config: normalizeConfig(),
+            config: makeConfig(),
             redisAdapter: redis,
         };
 
@@ -431,7 +454,7 @@ describe('readThroughCache', () => {
     });
 
     test('serves the second identical read from cache without calling the query', async () => {
-        const config = normalizeConfig({ tenantKeys: ['tenantId'] });
+        const config = makeConfig({ tenantKeys: ['tenantId'] });
         const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);
         const params = {
             model: 'Widget',
@@ -453,7 +476,7 @@ describe('readThroughCache', () => {
 
     test('releases the lock when the post-acquire recheck finds a cached value', async () => {
         const onCacheEvent = vi.fn();
-        const config = normalizeConfig({ stampede: { waitMs: 10, pollMs: 1 }, metrics: { onCacheEvent } });
+        const config = makeConfig({ stampede: { waitMs: 10, pollMs: 1 }, metrics: { onCacheEvent } });
         const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);
         const params = {
             model: 'Widget',
@@ -483,7 +506,7 @@ describe('readThroughCache', () => {
 
     test('reports a hit when a waiter receives the cached value', async () => {
         const onCacheEvent = vi.fn();
-        const config = normalizeConfig({ stampede: { waitMs: 20, pollMs: 1 }, metrics: { onCacheEvent } });
+        const config = makeConfig({ stampede: { waitMs: 20, pollMs: 1 }, metrics: { onCacheEvent } });
         const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);
         const params = {
             model: 'Widget',
@@ -513,7 +536,7 @@ describe('readThroughCache', () => {
     });
 
     test('clamps the TTL to maxTtlSeconds', async () => {
-        const config = normalizeConfig({ maxTtlSeconds: 10 });
+        const config = makeConfig({ maxTtlSeconds: 10 });
         const set = vi.spyOn(redis, 'setString');
 
         await readThroughCache({
@@ -531,7 +554,7 @@ describe('readThroughCache', () => {
     });
 
     test('falls back to the query when the cache read throws', async () => {
-        const config = normalizeConfig();
+        const config = makeConfig();
         vi.spyOn(redis, 'getString').mockRejectedValueOnce(new Error('redis down'));
         const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);
 
@@ -553,7 +576,7 @@ describe('readThroughCache', () => {
     test('falls back with cleaned args when tag version lookup throws', async () => {
         const warn = vi.fn();
         const onCacheEvent = vi.fn();
-        const config = normalizeConfig({
+        const config = makeConfig({
             logger: {
                 debug: vi.fn(),
                 info: vi.fn(),
@@ -588,7 +611,7 @@ describe('readThroughCache', () => {
 
     test('falls back when a custom-key tag version lookup throws', async () => {
         const onCacheEvent = vi.fn();
-        const config = normalizeConfig({ metrics: { onCacheEvent } });
+        const config = makeConfig({ metrics: { onCacheEvent } });
         vi.spyOn(redis, 'mgetString').mockRejectedValueOnce(new Error('redis down'));
         const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);
         const cleanedArgs = { where: { id: 'w1' } };
@@ -610,7 +633,7 @@ describe('readThroughCache', () => {
     });
 
     test('does not cache empty results when cacheEmpty is false', async () => {
-        const config = normalizeConfig({ cacheEmpty: false });
+        const config = makeConfig({ cacheEmpty: false });
 
         await readThroughCache({
             model: 'Widget',
@@ -628,7 +651,7 @@ describe('readThroughCache', () => {
 
     test('reports hit and miss to the metrics sink', async () => {
         const onCacheEvent = vi.fn();
-        const config = normalizeConfig({ metrics: { onCacheEvent } });
+        const config = makeConfig({ metrics: { onCacheEvent } });
         const params = {
             model: 'Widget',
             operation: 'findMany',
@@ -651,7 +674,7 @@ describe('readThroughCache', () => {
     test('rejects a foreign identity and tenant scope instead of returning its value', async () => {
         const onCacheEvent = vi.fn();
         const warn = vi.fn();
-        const config = normalizeConfig({
+        const config = makeConfig({
             tenantKeys: ['tenantId'],
             logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
             metrics: { onCacheEvent },
@@ -711,7 +734,7 @@ describe('readThroughCache', () => {
 
     test('queries Prisma when deleting a mismatched entry fails and logs the failure', async () => {
         const error = vi.fn();
-        const config = normalizeConfig({
+        const config = makeConfig({
             logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error },
         });
         const cleanedArgs = { where: { tenantId: 'tenant-a' } };
@@ -762,7 +785,7 @@ describe('readThroughCache', () => {
     ])('treats %s as an invalid envelope without serving it', async (_description, payload) => {
         const onCacheEvent = vi.fn();
         const debug = vi.fn();
-        const config = normalizeConfig({
+        const config = makeConfig({
             logger: { debug, info: vi.fn(), warn: vi.fn(), error: vi.fn() },
             metrics: { onCacheEvent },
         });
@@ -810,7 +833,7 @@ describe('readThroughCache', () => {
     test('queries Prisma and reports an invalid-envelope bypass when deletion fails', async () => {
         const onCacheEvent = vi.fn();
         const error = vi.fn();
-        const config = normalizeConfig({
+        const config = makeConfig({
             logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error },
             metrics: { onCacheEvent },
         });
@@ -862,7 +885,7 @@ describe('readThroughCache', () => {
 
 describe('handleWrite', () => {
     test('runs the write then bumps the resolved tag versions', async () => {
-        const config = normalizeConfig({ tenantKeys: ['tenantId'] });
+        const config = makeConfig({ tenantKeys: ['tenantId'] });
         const query = vi.fn().mockResolvedValue({ id: 'w1' });
 
         const result = await handleWrite({
@@ -881,7 +904,7 @@ describe('handleWrite', () => {
     });
 
     test('a write invalidates a previously cached read of the same tenant and model', async () => {
-        const config = normalizeConfig({ tenantKeys: ['tenantId'] });
+        const config = makeConfig({ tenantKeys: ['tenantId'] });
         const readQuery = vi.fn().mockResolvedValue([{ id: 'w1' }]);
         const readParams = {
             model: 'Widget',
@@ -915,7 +938,7 @@ describe('handleWrite', () => {
     });
 
     test('update and delete by ID use the returned tenant identity', async () => {
-        const config = normalizeConfig({ tenantKeys: ['tenantId'] });
+        const config = makeConfig({ tenantKeys: ['tenantId'] });
         const readQuery = vi.fn().mockResolvedValue([{ id: 'w1', tenantId: 't1', name: 'before' }]);
         const readParams = {
             model: 'Widget',
@@ -964,7 +987,7 @@ describe('handleWrite', () => {
     });
 
     test('uses a model-wide fallback when a write cannot determine the tenant', async () => {
-        const config = normalizeConfig({ tenantKeys: ['tenantId'] });
+        const config = makeConfig({ tenantKeys: ['tenantId'] });
         const readQuery = vi.fn().mockResolvedValue([{ id: 'w1', tenantId: 't1' }]);
         const readParams = {
             model: 'Widget',
@@ -995,7 +1018,7 @@ describe('handleWrite', () => {
     });
 
     test('a write to an unrelated tenant does not invalidate in precise mode', async () => {
-        const config = normalizeConfig({ tenantKeys: ['tenantId'], tenantPrecision: true });
+        const config = makeConfig({ tenantKeys: ['tenantId'], tenantPrecision: true });
         const readQuery = vi.fn().mockResolvedValue([{ id: 'w1' }]);
         const readParams = {
             model: 'Widget',
@@ -1029,7 +1052,7 @@ describe('handleWrite', () => {
         const entityIds = Array.from({ length: 20 }, (_, index) => `w${index}`);
         const onCacheEvent = vi.fn();
         const warn = vi.fn();
-        const config = normalizeConfig({
+        const config = makeConfig({
             tenantKeys: ['tenantId'],
             tenantPrecision: true,
             maxTagsPerQuery: 5,
@@ -1095,7 +1118,7 @@ describe('handleWrite', () => {
     });
 
     test('a write to an unrelated tenant invalidates under the safe default', async () => {
-        const config = normalizeConfig({ tenantKeys: ['tenantId'] });
+        const config = makeConfig({ tenantKeys: ['tenantId'] });
         const readQuery = vi.fn().mockResolvedValue([{ id: 'w1' }]);
         const readParams = {
             model: 'Widget',
@@ -1126,7 +1149,7 @@ describe('handleWrite', () => {
 
     test('warns when precise-mode write tenant identity is unavailable', async () => {
         const warn = vi.fn();
-        const config = normalizeConfig({
+        const config = makeConfig({
             tenantKeys: ['tenantId'],
             tenantPrecision: true,
             logger: {
@@ -1156,7 +1179,7 @@ describe('handleWrite', () => {
     });
 
     test('a dependency tag propagates invalidation across models', async () => {
-        const config = normalizeConfig({ tenantKeys: ['tenantId'], dependencyTags: { Part: ['Widget'] } });
+        const config = makeConfig({ tenantKeys: ['tenantId'], dependencyTags: { Part: ['Widget'] } });
         const readQuery = vi.fn().mockResolvedValue([{ id: 'w1' }]);
         const readParams = {
             model: 'Widget',

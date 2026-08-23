@@ -58,8 +58,8 @@ export interface IndexedModel {
     readDependencies?: ReadDependencyResolver;
 }
 
-export interface AnalysisContext {
-    schema: CacheSchemaDescriptor;
+export interface AnalysisContext<TSchema extends CacheSchemaDescriptor = CacheSchemaDescriptor> {
+    schema: TSchema;
     models: Record<string, IndexedModel>;
 }
 
@@ -199,7 +199,7 @@ function validateConfigs<TSchema extends CacheSchemaDescriptor>(
 export function createAnalysisContext<TSchema extends CacheSchemaDescriptor>(
     schema: TSchema,
     configs: CacheModelConfigs<TSchema>,
-): AnalysisContext {
+): AnalysisContext<TSchema> {
     validateSchema(schema);
     validateConfigs(schema, configs);
 

@@ -8,7 +8,7 @@ export interface PreparedCacheKey {
     tenantScope: string[];
 }
 
-export interface CachedEnvelopeV2 {
+export interface CachedEnvelopeV3 {
     identity: string;
     tenantScope: string[];
     value: unknown;
@@ -43,7 +43,7 @@ export interface OptimizedRedisPrimitives {
     bumpTagVersions(keys: string[], ttlSeconds: number, callbacks?: OptimizedScriptCallbacks): Promise<number[]>;
 }
 
-import type { CacheSchemaDescriptor, CacheScope } from './schema';
+import type { AnalysisContext, CacheModelConfigs, CacheSchemaDescriptor, CacheScope } from './schema';
 
 export type CacheBypassReason =
     | 'model-scope-unconfigured'
@@ -184,9 +184,7 @@ export interface CacheReadOptions {
     debug?: boolean;
     /** Tags for scoped cache invalidation (e.g., ['tenant:123'] for multi-tenant) */
     tags?: string[];
-    /** Infer tenant/model/entity tags from Prisma args (default: true) */
-    inferTags?: boolean;
-    /** Merge explicit tags with inferred tags (default: true). When false, explicit tags replace inferred tags. */
+    /** Merge explicit tags with analyzed dependencies (default: true). When false, explicit tags replace inferred tags. */
     mergeTags?: boolean;
     /** Override stampede protection settings for this query */
     stampede?: CacheStampedeOptions;
@@ -209,9 +207,7 @@ export interface CacheWriteOptions {
     tags?: string[];
     /** Enable debug logging for cache invalidation */
     debug?: boolean;
-    /** Infer tenant/model/entity tags from Prisma args/data (default: true) */
-    inferTags?: boolean;
-    /** Merge explicit tags with inferred tags (default: true). When false, explicit tags replace inferred tags. */
+    /** Merge explicit tags with analyzed dependencies (default: true). When false, explicit tags replace inferred tags. */
     mergeTags?: boolean;
 }
 
@@ -259,6 +255,7 @@ export interface CacheScriptEvent {
  * import { PrismaPg } from '@prisma/adapter-pg';
  * import { createClient } from 'redis';
  * import { createCacheTagsExtension } from 'prisma-extension-cache-tags';
+ * import { cacheSchema } from './generated/cache-tags';
  * import { createNodeRedisAdapter } from 'prisma-extension-cache-tags/node-redis';
  * import { PrismaClient } from './generated/prisma/client';
  *
@@ -273,8 +270,10 @@ export interface CacheScriptEvent {
  *   createCacheTagsExtension(redisAdapter, {
  *     defaultTtlSeconds: 60,
  *     maxTtlSeconds: 600,
- *     keyPrefix: 'myapp:cache:v2',
- *     tenantKeys: ['tenantId'],
+ *     schema: cacheSchema,
+ *     models: {
+ *       Widget: { tenant: { field: 'tenantId', namespace: 'tenant' } },
+ *     },
  *   }),
  * );
  *
@@ -290,14 +289,16 @@ export interface CacheScriptEvent {
  * });
  * ```
  */
-export interface CacheTagsConfig {
+export interface CacheTagsConfig<TSchema extends CacheSchemaDescriptor = CacheSchemaDescriptor> {
+    schema: TSchema;
+    models: CacheModelConfigs<TSchema>;
     /** Enable/disable caching globally (default: true) */
     enabled?: boolean;
     /** Default TTL in seconds when not specified (default: 30) */
     defaultTtlSeconds?: number;
     /** Maximum allowed TTL in seconds (default: 300) */
     maxTtlSeconds?: number;
-    /** Key prefix for all cache keys (default: 'prismaCacheTags:v2') */
+    /** Key prefix for all cache keys (default: 'prismaCacheTags:v3') */
     keyPrefix?: string;
     /** Cache null results (default: true) */
     cacheNull?: boolean;
@@ -312,36 +313,13 @@ export interface CacheTagsConfig {
     maxTagsPerQuery?: number;
     /** Default stampede protection behaviour */
     stampede?: CacheStampedeOptions;
-    /** Models whose caches must also be invalidated when a given model is written */
-    dependencyTags?: Record<string, string[] | CacheDependencyResolver>;
-    /** Enable automatic tenant/model/entity tag inference (default: true) */
-    inferTags?: boolean;
-    /**
-     * Arg property names that identify the tenant, e.g. ['tenantId', 'accountId'].
-     * Default: [] — no tenant scoping, tags fall back to the `global:` namespace.
-     */
-    tenantKeys?: string[];
-    /**
-     * Assume every cached read AND every write carries a tenant key in its args.
-     *
-     * Default `false`: reads and writes both always emit the model-level tag, so a write can
-     * never miss a cached read. Invalidation granularity is per-model.
-     *
-     * Set `true` only if your application guarantees that every cached read and every write
-     * includes one of `tenantKeys` in its args — for example a Prisma client already scoped per
-     * tenant. Invalidation then stays tenant-precise, and a write that cannot resolve a tenant
-     * falls back to invalidating the model across all tenants and logs a warning.
-     */
-    tenantPrecision?: boolean;
-    /** Arg property names that identify a single record. Default: ['id'] */
-    entityKeys?: string[];
     /** Structured logger. Default: no-op. */
     logger?: Logger;
     /** Metrics sink for cache and optimized-script events. Default: no-op. */
     metrics?: Metrics;
 }
 
-export interface NormalizedCacheConfig {
+export interface NormalizedCacheConfig<TSchema extends CacheSchemaDescriptor = CacheSchemaDescriptor> {
     enabled: boolean;
     defaultTtlSeconds: number;
     maxTtlSeconds: number;
@@ -351,10 +329,18 @@ export interface NormalizedCacheConfig {
     schemaVersion: number;
     maxTagsPerQuery: number;
     stampede: Required<CacheStampedeOptions>;
+    analysis: AnalysisContext<TSchema>;
+    /**
+     * @internal Legacy resolver scaffolding retained until Task 6 removes src/tags.ts.
+     */
     dependencyTags: Record<string, string[] | CacheDependencyResolver>;
+    /** @internal */
     inferTags: boolean;
+    /** @internal */
     tenantKeys: string[];
+    /** @internal */
     tenantPrecision: boolean;
+    /** @internal */
     entityKeys: string[];
     logger: Logger;
     metrics: Metrics;

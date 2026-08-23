@@ -3,6 +3,7 @@ import { normalizeConfig } from './config';
 import { getTagVersionKey } from './keys';
 import { createOptimizedScriptObservation } from './optimized';
 import type { CacheTagsConfig, NormalizedCacheConfig, RedisAdapter } from './types';
+import type { CacheSchemaDescriptor } from './schema';
 
 type InvalidationContext = {
     tags: Set<string>;
@@ -95,9 +96,9 @@ export async function publishInvalidation(tags: string[], config: NormalizedCach
 export async function withCacheInvalidation<T>(
     fn: () => Promise<T>,
     redisAdapter: RedisAdapter,
-    config?: CacheTagsConfig,
+    config: CacheTagsConfig<CacheSchemaDescriptor> | NormalizedCacheConfig,
 ): Promise<T> {
-    const normalized = normalizeConfig(config);
+    const normalized = 'analysis' in config ? config : normalizeConfig(config);
 
     return runWithInvalidationContext(fn, async (tags) => {
         try {

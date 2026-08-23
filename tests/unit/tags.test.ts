@@ -2,6 +2,8 @@ import { describe, expect, test } from 'vitest';
 import { noopLogger, noopMetrics } from '../../src/observability';
 import { normalizeTags, resolveCacheTags } from '../../src/tags';
 import type { NormalizedCacheConfig } from '../../src/types';
+import { createAnalysisContext } from '../../src/schema';
+import { cacheModels, cacheSchema } from '../fixture/cache-schema';
 
 function makeConfig(overrides: Partial<NormalizedCacheConfig> = {}): NormalizedCacheConfig {
     return {
@@ -21,6 +23,7 @@ function makeConfig(overrides: Partial<NormalizedCacheConfig> = {}): NormalizedC
         entityKeys: ['id'],
         logger: noopLogger,
         metrics: noopMetrics,
+        analysis: createAnalysisContext(cacheSchema, cacheModels),
         ...overrides,
     };
 }

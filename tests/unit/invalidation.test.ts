@@ -10,7 +10,9 @@ import { normalizeConfig } from '../../src/config';
 import { getTagVersionKey } from '../../src/keys';
 import { createOptimizedRedisPrimitives } from '../../src/optimized';
 import { noopLogger, noopMetrics } from '../../src/observability';
-import type { NormalizedCacheConfig } from '../../src/types';
+import type { CacheTagsConfig, NormalizedCacheConfig } from '../../src/types';
+import { createAnalysisContext } from '../../src/schema';
+import { cacheModels, cacheSchema } from '../fixture/cache-schema';
 import { createFakeRedis, type FakeRedis } from './fake-redis';
 
 const config: NormalizedCacheConfig = {
@@ -23,6 +25,7 @@ const config: NormalizedCacheConfig = {
     schemaVersion: 1,
     maxTagsPerQuery: 30,
     stampede: { waitMs: 1500, pollMs: 50, lockTtlMs: 5000 },
+    analysis: createAnalysisContext(cacheSchema, cacheModels),
     dependencyTags: {},
     inferTags: true,
     tenantKeys: [],
@@ -31,6 +34,10 @@ const config: NormalizedCacheConfig = {
     logger: noopLogger,
     metrics: noopMetrics,
 };
+
+function makePublicConfig(overrides: Partial<Omit<CacheTagsConfig, 'schema' | 'models'>> = {}): CacheTagsConfig {
+    return { schema: cacheSchema, models: cacheModels, ...overrides };
+}
 
 let redis: FakeRedis;
 
@@ -164,11 +171,12 @@ describe('deferred invalidation context', () => {
                 await publishInvalidation(['default-config'], config, redis);
             },
             redis,
+            makePublicConfig(),
         );
 
-        expect(redis.store.get(getTagVersionKey('default-config', normalizeConfig()))).toBe('1');
+        expect(redis.store.get(getTagVersionKey('default-config', normalizeConfig(makePublicConfig())))).toBe('1');
 
-        const partialConfig = { keyPrefix: 'custom-prefix', maxTtlSeconds: 60 };
+        const partialConfig = makePublicConfig({ keyPrefix: 'custom-prefix', maxTtlSeconds: 60 });
         const partialNormalized = normalizeConfig(partialConfig);
         await withCacheInvalidation(
             async () => {
@@ -184,6 +192,8 @@ describe('deferred invalidation context', () => {
     test('logs deferred invalidation errors without rejecting the wrapper', async () => {
         const error = vi.fn();
         const wrapperConfig = normalizeConfig({
+            schema: cacheSchema,
+            models: cacheModels,
             logger: {
                 debug: vi.fn(),
                 info: vi.fn(),

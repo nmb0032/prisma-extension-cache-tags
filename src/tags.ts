@@ -143,7 +143,8 @@ export function resolveCacheTags(
     additionalSources: unknown[] = [],
 ): ResolvedCacheTags {
     const explicitTags = options?.tags ?? [];
-    const shouldInfer = options?.inferTags ?? config.inferTags;
+    // Legacy resolver scaffolding: Task 6 removes this resolver and its option-specific override.
+    const shouldInfer = (options as { inferTags?: boolean } | undefined)?.inferTags ?? config.inferTags;
     const shouldMerge = options?.mergeTags ?? true;
     const tenantKeys = new Set(config.tenantKeys);
     const entityKeys = new Set(config.entityKeys);

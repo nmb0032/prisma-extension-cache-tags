@@ -25,11 +25,11 @@ export function prepareCacheKey(
     operation: string,
     cleanedArgs: unknown,
     normalizedTags: string[],
-    tenantIds: string[],
+    tenantScope: string[],
     config: NormalizedCacheConfig,
     customKey?: string,
 ): PreparedCacheKey {
-    const tenantScope = Array.from(new Set(tenantIds)).sort();
+    const normalizedTenantScope = Array.from(new Set(tenantScope)).sort();
     const tags = Array.from(new Set(normalizedTags)).sort();
     const identityInput: {
         model: string;
@@ -45,7 +45,7 @@ export function prepareCacheKey(
         args: cleanedArgs,
         schemaVersion: config.schemaVersion,
         tags,
-        tenantScope,
+        tenantScope: normalizedTenantScope,
     };
 
     if (customKey !== undefined) {
@@ -68,7 +68,7 @@ export function prepareCacheKey(
         baseKey: `${config.keyPrefix}:qry:${model}:${operation}:${digest}`,
         tagVersionKeys: tags.map((tag) => getTagVersionKey(tag, config)),
         identity,
-        tenantScope,
+        tenantScope: normalizedTenantScope,
     };
 }
 

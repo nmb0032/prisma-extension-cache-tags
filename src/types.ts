@@ -211,14 +211,6 @@ export interface CacheWriteOptions {
     mergeTags?: boolean;
 }
 
-export type CacheDependencyResolver = (context: {
-    model: string;
-    operation: string;
-    tenantIds: string[];
-    entityIds: string[];
-    args: unknown;
-}) => string[];
-
 export type LogData = Record<string, unknown>;
 
 export interface Logger {
@@ -233,7 +225,8 @@ export interface CacheEvent {
     operation: string;
     result: 'hit' | 'miss' | 'bypass';
     path: 'optimized' | 'fallback' | 'bypass';
-    reason?: string;
+    reason?: CacheBypassReason;
+    dependencyCount?: number;
 }
 
 export interface Metrics {
@@ -330,28 +323,8 @@ export interface NormalizedCacheConfig<TSchema extends CacheSchemaDescriptor = C
     maxTagsPerQuery: number;
     stampede: Required<CacheStampedeOptions>;
     analysis: AnalysisContext<TSchema>;
-    /**
-     * @internal Legacy resolver scaffolding retained until Task 6 removes src/tags.ts.
-     */
-    dependencyTags: Record<string, string[] | CacheDependencyResolver>;
-    /** @internal */
-    inferTags: boolean;
-    /** @internal */
-    tenantKeys: string[];
-    /** @internal */
-    tenantPrecision: boolean;
-    /** @internal */
-    entityKeys: string[];
     logger: Logger;
     metrics: Metrics;
-}
-
-export interface ResolvedCacheTags {
-    tags: string[];
-    tenantIds: string[];
-    entityIds: string[];
-    cacheable?: boolean;
-    bypassReason?: 'tenant-tag-limit';
 }
 
 /**

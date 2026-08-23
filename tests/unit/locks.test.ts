@@ -18,11 +18,6 @@ const config: NormalizedCacheConfig = {
     maxTagsPerQuery: 30,
     stampede: { waitMs: 200, pollMs: 10, lockTtlMs: 5000 },
     analysis: createAnalysisContext(cacheSchema, cacheModels),
-    dependencyTags: {},
-    inferTags: true,
-    tenantKeys: [],
-    tenantPrecision: false,
-    entityKeys: ['id'],
     logger: noopLogger,
     metrics: noopMetrics,
 };

@@ -1,19 +1,17 @@
+import type { CacheScope } from './schema';
+import { globalEntityTag, globalModelTag, normalizeTags, scopeEntityTag, scopeModelTag, scopeRootTag } from './tag-format';
+
 export const createCacheTags = {
-    /** All cached reads for a tenant: `tenant:<tenantId>` */
-    forTenant(tenantId: string): string[] {
-        return [`tenant:${tenantId}`];
+    forScope(scope: CacheScope): string[] {
+        return [scopeRootTag(scope)];
     },
-    /** All cached reads of a model within a tenant, or globally when tenantId is omitted */
-    forModel(tenantId: string | undefined, model: string): string[] {
-        return [tenantId ? `tenant:${tenantId}:model:${model}` : `global:model:${model}`];
+    forModel(scope: CacheScope | undefined, model: string): string[] {
+        return [scope ? scopeModelTag(scope, model) : globalModelTag(model)];
     },
-    /** A single record: `tenant:<tenantId>:<model>:<entityId>` */
-    forEntity(tenantId: string | undefined, model: string, entityId: string): string[] {
-        const normalizedModel = model.charAt(0).toLowerCase() + model.slice(1);
-        return [tenantId ? `tenant:${tenantId}:${normalizedModel}:${entityId}` : `global:${normalizedModel}:${entityId}`];
+    forEntity(scope: CacheScope | undefined, model: string, identity: string): string[] {
+        return [scope ? scopeEntityTag(scope, model, identity) : globalEntityTag(model, identity)];
     },
-    /** Combine several tag lists into one deduped list */
     combine(...tagLists: string[][]): string[] {
-        return Array.from(new Set(tagLists.flat()));
+        return normalizeTags(tagLists.flat());
     },
 };

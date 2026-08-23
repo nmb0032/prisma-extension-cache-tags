@@ -15,10 +15,13 @@ import { buildVersionedCacheKey, createVersionToken, getCacheLockKey, prepareCac
 import { acquireCacheLock, releaseCacheLock, resolveStampedeOptions, waitForCachedValue } from './locks';
 import { createOptimizedScriptObservation } from './optimized';
 import { deserializeCacheEnvelope, InvalidCacheEnvelopeError, matchesCacheIdentity, serializeCacheEnvelope } from './serialization';
-import { resolveCacheTags } from './tags';
+import { analyzePrimaryScope, analyzeReadTags } from './read-analysis';
+import { analyzeWriteTags } from './write-analysis';
+import { normalizeTags } from './tag-format';
 import {
     READ_OPERATIONS,
     WRITE_OPERATIONS,
+    type CacheBypassReason,
     type CacheReadOptions,
     type CacheTagsConfig,
     type CacheWriteOptions,
@@ -26,6 +29,7 @@ import {
     type NormalizedCacheConfig,
     type PreparedCacheKey,
     type ReadOperation,
+    type ReadAnalysis,
     type RedisAdapter,
     type WriteOperation,
 } from './types';
@@ -39,7 +43,8 @@ export interface PreparedRead {
     tenantScope: string[];
     preparedKey: PreparedCacheKey;
     cacheable?: boolean;
-    bypassReason?: 'tenant-tag-limit';
+    bypassReason?: CacheBypassReason;
+    dependencyCount?: number;
 }
 
 interface CachedHit {
@@ -73,32 +78,47 @@ function normalizeTtl(options: CacheReadOptions, config: NormalizedCacheConfig):
     return Math.max(1, Math.min(requestedTtl, config.maxTtlSeconds));
 }
 
-function prepareRead(
+export function prepareRead(
     model: string,
     operation: string,
     cleanedArgs: unknown,
-    args: unknown,
+    _args: unknown,
     cacheOptions: CacheReadOptions,
     config: NormalizedCacheConfig,
 ): PreparedRead {
-    const resolvedTags = resolveCacheTags(model, operation, args, cacheOptions, config, false);
+    const analysis = cacheOptions.mergeTags === false
+        ? analyzePrimaryScope({ model, args: cleanedArgs, context: config.analysis })
+        : analyzeReadTags({
+            model,
+            operation,
+            args: cleanedArgs,
+            context: config.analysis,
+            maxTagsPerQuery: config.maxTagsPerQuery,
+        });
+    const inferredTags = cacheOptions.mergeTags === false ? [] : (analysis as ReadAnalysis).tags;
+    const tags = normalizeTags(
+        cacheOptions.mergeTags === false
+            ? cacheOptions.tags ?? []
+            : [...inferredTags, ...(cacheOptions.tags ?? [])],
+    );
     const preparedKey = prepareCacheKey(
         model,
         operation,
         cleanedArgs,
-        resolvedTags.tags,
-        resolvedTags.tenantIds,
+        tags,
+        analysis.tenantScope,
         config,
         cacheOptions.key,
     );
 
     return {
         cleanedArgs,
-        normalizedTags: resolvedTags.tags,
+        normalizedTags: tags,
         tenantScope: preparedKey.tenantScope,
         preparedKey,
-        cacheable: resolvedTags.cacheable,
-        bypassReason: resolvedTags.bypassReason,
+        cacheable: analysis.cacheable,
+        bypassReason: analysis.bypassReason,
+        dependencyCount: analysis.dependencies.length,
     };
 }
 
@@ -111,7 +131,7 @@ async function validateCachedPayload(
     redisAdapter: RedisAdapter,
     config: NormalizedCacheConfig,
     path: 'optimized' | 'fallback',
-    onBypass: (reason: 'identity-mismatch' | 'invalid-envelope') => void,
+    onBypass: (reason: PayloadBypassReason) => void,
 ): Promise<CachedHit | undefined> {
     let cached: ReturnType<typeof deserializeCacheEnvelope>;
     try {
@@ -197,7 +217,7 @@ async function tryGetCachedValue(
     redisAdapter: RedisAdapter,
     config: NormalizedCacheConfig,
     path: 'optimized' | 'fallback',
-    onBypass: (reason: 'identity-mismatch' | 'invalid-envelope') => void,
+    onBypass: (reason: PayloadBypassReason) => void,
 ): Promise<CachedHit | undefined> {
     const payload = await redisAdapter.getString(cacheKey);
     if (payload === null) {
@@ -219,7 +239,7 @@ interface ReadThroughParams {
     redisAdapter: RedisAdapter;
 }
 
-type CacheBypassReason = 'identity-mismatch' | 'invalid-envelope';
+type PayloadBypassReason = 'identity-mismatch' | 'invalid-envelope';
 
 function errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
@@ -240,7 +260,7 @@ function logScriptFailure(
 async function readThroughFallback(params: ReadThroughParams, preparedRead: PreparedRead, ttlSeconds: number): Promise<unknown> {
     const { model, operation, cleanedArgs, query, cacheOptions, config, redisAdapter } = params;
     let cacheKey: string;
-    let bypassReason: CacheBypassReason | undefined;
+    let bypassReason: PayloadBypassReason | undefined;
 
     try {
         const versions = await redisAdapter.mgetString(preparedRead.preparedKey.tagVersionKeys);
@@ -353,7 +373,7 @@ async function readThroughFallback(params: ReadThroughParams, preparedRead: Prep
 async function readThroughOptimized(params: ReadThroughParams, preparedRead: PreparedRead, ttlSeconds: number): Promise<unknown> {
     const { model, operation, cleanedArgs, query, cacheOptions, config, redisAdapter } = params;
     const optimized = redisAdapter.optimized!;
-    let bypassReason: CacheBypassReason | undefined;
+    let bypassReason: PayloadBypassReason | undefined;
     const { lockTtlMs } = resolveStampedeOptions(cacheOptions, config);
     const lockToken = randomUUID();
 
@@ -494,7 +514,7 @@ export async function readThroughCache(params: ReadThroughParams): Promise<unkno
     const preparedRead = params.preparedRead ?? prepareRead(model, operation, cleanedArgs, args, cacheOptions, config);
 
     if (preparedRead.cacheable === false) {
-        const reason = preparedRead.bypassReason ?? 'tenant-tag-limit';
+        const reason = preparedRead.bypassReason ?? 'query-shape-unsupported';
         config.logger.warn({ model, operation, reason }, 'Cache read bypassed safely');
         config.metrics.onCacheEvent({
             model,
@@ -502,6 +522,7 @@ export async function readThroughCache(params: ReadThroughParams): Promise<unkno
             result: 'bypass',
             path: 'bypass',
             reason,
+            ...(preparedRead.dependencyCount === undefined ? {} : { dependencyCount: preparedRead.dependencyCount }),
         });
         return query(cleanedArgs);
     }
@@ -525,27 +546,38 @@ export async function handleWrite(params: {
 }): Promise<unknown> {
     const { model, operation, args, cleanedArgs, query, cacheOptions, config, redisAdapter } = params;
     const result = await query(cleanedArgs);
-    const resolvedTags = resolveCacheTags(model, operation, args, cacheOptions, config, true, [result]);
-    if (config.tenantPrecision && config.tenantKeys.length > 0 && resolvedTags.tenantIds.length === 0) {
+    const analysis = analyzeWriteTags({
+        model,
+        operation,
+        args,
+        result,
+        context: config.analysis,
+    });
+    const tags = normalizeTags(
+        cacheOptions?.mergeTags === false
+            ? cacheOptions.tags ?? []
+            : [...analysis.tags, ...(cacheOptions?.tags ?? [])],
+    );
+    if (analysis.globalFallbackModels.length > 0) {
         config.logger.warn(
-            { model, operation },
+            { model, operation, fallbackModels: analysis.globalFallbackModels },
             'Tenant identity unavailable after write; invalidating the model-wide cache fallback',
         );
     }
 
-    if (resolvedTags.tags.length === 0) {
+    if (tags.length === 0) {
         config.logger.warn({ model, operation }, 'Write completed but no cache invalidation tags were resolved');
         return result;
     }
 
     try {
-        await publishInvalidation(resolvedTags.tags, config, redisAdapter);
+        await publishInvalidation(tags, config, redisAdapter);
         if (cacheOptions?.debug) {
-            config.logger.debug({ model, operation, tags: resolvedTags.tags }, 'Published cache invalidation');
+            config.logger.debug({ model, operation }, 'Published cache invalidation');
         }
     } catch (error) {
         config.logger.error(
-            { model, operation, tags: resolvedTags.tags, error: (error as Error).message },
+            { model, operation, error: (error as Error).message },
             'Cache invalidation failed after write',
         );
     }

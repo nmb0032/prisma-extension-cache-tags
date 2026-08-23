@@ -3,7 +3,7 @@ import { createNodeRedisAdapter } from '../../src/adapters/node-redis';
 import { normalizeConfig } from '../../src/config';
 import { buildVersionedCacheKey, createVersionToken, prepareCacheKey } from '../../src/keys';
 import { acquireCacheLock, releaseCacheLock } from '../../src/locks';
-import { resolveCacheTags } from '../../src/tags';
+import { analyzeReadTags } from '../../src/read-analysis';
 import { createCachedClient, createQueryCounter, createRedis } from './helpers';
 import { cacheModels, cacheSchema } from '../fixture/cache-schema';
 
@@ -68,9 +68,14 @@ describe('distributed stampede protection', () => {
         const redisAdapter = createNodeRedisAdapter(redis);
         const config = normalizeConfig({ schema: cacheSchema, models: cacheModels });
         const args = { where: { tenantId: 't1' } };
-        const cacheOptions = { ttlSeconds: 60 };
-        const tags = resolveCacheTags('Widget', 'findMany', args, cacheOptions, config, false).tags;
-        const prepared = prepareCacheKey('Widget', 'findMany', args, tags, ['t1'], config);
+        const analysis = analyzeReadTags({
+            model: 'Widget',
+            operation: 'findMany',
+            args,
+            context: config.analysis,
+            maxTagsPerQuery: config.maxTagsPerQuery,
+        });
+        const prepared = prepareCacheKey('Widget', 'findMany', args, analysis.tags, analysis.tenantScope, config);
         const versions = await redisAdapter.mgetString(prepared.tagVersionKeys);
         const cacheKey = buildVersionedCacheKey(prepared.baseKey, createVersionToken(versions));
         const ownerLock = await acquireCacheLock(cacheKey, { stampede: { waitMs: 10, pollMs: 1 } }, config, redisAdapter);

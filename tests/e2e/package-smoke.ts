@@ -41,7 +41,7 @@ function main(): void {
                 '-e',
                 "const m = require('prisma-extension-cache-tags');" +
                     "if (typeof m.createCacheTagsExtension !== 'function') { throw new Error('createCacheTagsExtension missing from CJS build'); }" +
-                    "if (typeof m.createCacheTags.forTenant !== 'function') { throw new Error('createCacheTags missing from CJS build'); }",
+                    "if (typeof m.createCacheTags.forScope !== 'function') { throw new Error('createCacheTags missing from CJS build'); }",
             ],
             scratch,
         );
@@ -54,7 +54,7 @@ function main(): void {
                 '-e',
                 "const m = await import('prisma-extension-cache-tags');" +
                     "if (typeof m.createCacheTagsExtension !== 'function') { throw new Error('createCacheTagsExtension missing from ESM build'); }" +
-                    "if (typeof m.createCacheTags.forTenant !== 'function') { throw new Error('createCacheTags missing from ESM build'); }",
+                    "if (typeof m.createCacheTags.forScope !== 'function') { throw new Error('createCacheTags missing from ESM build'); }",
             ],
             scratch,
         );

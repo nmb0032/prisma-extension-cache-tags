@@ -16,11 +16,6 @@ const config: NormalizedCacheConfig = {
     maxTagsPerQuery: 30,
     stampede: { waitMs: 1500, pollMs: 50, lockTtlMs: 5000 },
     analysis: createAnalysisContext(cacheSchema, cacheModels),
-    dependencyTags: {},
-    inferTags: true,
-    tenantKeys: [],
-    tenantPrecision: false,
-    entityKeys: ['id'],
     logger: noopLogger,
     metrics: noopMetrics,
 };
@@ -28,22 +23,22 @@ const config: NormalizedCacheConfig = {
 describe('cache keys', () => {
     test('are deterministic for identical inputs and insensitive to insertion order', () => {
         const args = { where: { tenantId: 't1' } };
-        const a = prepareCacheKey('Widget', 'findMany', args, ['tenant:t1'], ['t1'], config);
-        const b = prepareCacheKey('Widget', 'findMany', { where: { tenantId: 't1' } }, ['tenant:t1'], ['t1'], config);
+        const a = prepareCacheKey('Widget', 'findMany', args, ['tenant:t1'], ['tenant:t1'], config);
+        const b = prepareCacheKey('Widget', 'findMany', { where: { tenantId: 't1' } }, ['tenant:t1'], ['tenant:t1'], config);
         expect(a.baseKey).toBe(b.baseKey);
         expect(a.identity).toBe(b.identity);
     });
 
     test('includes the complete canonical identity in the digest source', () => {
-        const a = prepareCacheKey('Widget', 'findMany', { where: { tenantId: 't1' } }, [], ['t1'], config);
-        const b = prepareCacheKey('Widget', 'findMany', { where: { tenantId: 't2' } }, [], ['t2'], config);
+        const a = prepareCacheKey('Widget', 'findMany', { where: { tenantId: 't1' } }, [], ['tenant:t1'], config);
+        const b = prepareCacheKey('Widget', 'findMany', { where: { tenantId: 't2' } }, [], ['tenant:t2'], config);
         expect(a.baseKey).not.toBe(b.baseKey);
         expect(a.identity).not.toBe(b.identity);
     });
 
     test('sorts and deduplicates tenant scope while retaining normalized tag keys', () => {
-        const prepared = prepareCacheKey('Widget', 'findMany', {}, ['beta', 'alpha', 'beta'], ['tenant-b', 'tenant-a', 'tenant-a'], config);
-        expect(prepared.tenantScope).toEqual(['tenant-a', 'tenant-b']);
+        const prepared = prepareCacheKey('Widget', 'findMany', {}, ['beta', 'alpha', 'beta'], ['tenant:tenant-b', 'tenant:tenant-a', 'tenant:tenant-a'], config);
+        expect(prepared.tenantScope).toEqual(['tenant:tenant-a', 'tenant:tenant-b']);
         expect(prepared.tagVersionKeys).toEqual([
             getTagVersionKey('alpha', config),
             getTagVersionKey('beta', config),
@@ -64,13 +59,13 @@ describe('cache keys', () => {
     });
 
     test('keeps custom keys isolated within model, operation, arguments, tags, and tenant scope', () => {
-        const baseline = prepareCacheKey('Widget', 'findMany', { where: { id: 'w1' } }, ['tag:a'], ['tenant-a'], config, 'shared');
+        const baseline = prepareCacheKey('Widget', 'findMany', { where: { id: 'w1' } }, ['tag:a'], ['tenant:tenant-a'], config, 'shared');
         const variants = [
-            prepareCacheKey('Part', 'findMany', { where: { id: 'w1' } }, ['tag:a'], ['tenant-a'], config, 'shared'),
-            prepareCacheKey('Widget', 'count', { where: { id: 'w1' } }, ['tag:a'], ['tenant-a'], config, 'shared'),
-            prepareCacheKey('Widget', 'findMany', { where: { id: 'w2' } }, ['tag:a'], ['tenant-a'], config, 'shared'),
-            prepareCacheKey('Widget', 'findMany', { where: { id: 'w1' } }, ['tag:b'], ['tenant-a'], config, 'shared'),
-            prepareCacheKey('Widget', 'findMany', { where: { id: 'w1' } }, ['tag:a'], ['tenant-b'], config, 'shared'),
+            prepareCacheKey('Part', 'findMany', { where: { id: 'w1' } }, ['tag:a'], ['tenant:tenant-a'], config, 'shared'),
+            prepareCacheKey('Widget', 'count', { where: { id: 'w1' } }, ['tag:a'], ['tenant:tenant-a'], config, 'shared'),
+            prepareCacheKey('Widget', 'findMany', { where: { id: 'w2' } }, ['tag:a'], ['tenant:tenant-a'], config, 'shared'),
+            prepareCacheKey('Widget', 'findMany', { where: { id: 'w1' } }, ['tag:b'], ['tenant:tenant-a'], config, 'shared'),
+            prepareCacheKey('Widget', 'findMany', { where: { id: 'w1' } }, ['tag:a'], ['tenant:tenant-b'], config, 'shared'),
         ];
 
         for (const variant of variants) {

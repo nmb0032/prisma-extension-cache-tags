@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { createOptimizedRedisPrimitives } from '../../src/optimized';
 import { buildVersionedCacheKey, getTagVersionKey, prepareCacheKey } from '../../src/keys';
-import { createCacheTagsExtension, handleWrite, normalizeConfig, readThroughCache } from '../../src/extension';
+import { createCacheTagsExtension, handleWrite, normalizeConfig, prepareRead, readThroughCache } from '../../src/extension';
 import { acquireCacheLock, releaseCacheLock } from '../../src/locks';
 import { serializeCacheEnvelope } from '../../src/serialization';
 import { createFakeRedis, type FakeRedis } from './fake-redis';
@@ -19,11 +19,18 @@ function makeConfig(
         stampede?: Partial<NormalizedCacheConfig['stampede']>;
     } = {},
 ): NormalizedCacheConfig {
-    const base = normalizeConfig({ schema: cacheSchema, models: cacheModels });
-    const { stampede, ...legacyOverrides } = overrides;
+    const base = normalizeConfig({
+        schema: cacheSchema,
+        models: {
+            ...cacheModels,
+            Widget: { tenant: false },
+            Part: { tenant: false },
+        },
+    });
+    const { stampede, ...overridesWithoutStampede } = overrides;
     return {
         ...base,
-        ...legacyOverrides,
+        ...overridesWithoutStampede,
         stampede: { ...base.stampede, ...stampede },
         analysis: base.analysis,
     };
@@ -61,6 +68,136 @@ describe('normalizeConfig', () => {
 });
 
 describe('createCacheTagsExtension', () => {
+    test('prepares relation-aware subscriptions while plain reads remain primary-only', () => {
+        const config = normalizeConfig({ schema: cacheSchema, models: cacheModels });
+        const withEquipment = prepareRead(
+            'WorkOrder',
+            'findMany',
+            { where: { organizationId: 'org_1' }, include: { equipment: true } },
+            { where: { organizationId: 'org_1' }, include: { equipment: true } },
+            { ttlSeconds: 60 },
+            config,
+        );
+        const plain = prepareRead(
+            'WorkOrder',
+            'findMany',
+            { where: { organizationId: 'org_1' } },
+            { where: { organizationId: 'org_1' } },
+            { ttlSeconds: 60 },
+            config,
+        );
+
+        expect(withEquipment.normalizedTags).toEqual(expect.arrayContaining([
+            'scope:organization:org_1:model:WorkOrder',
+            'scope:organization:org_1:model:Equipment',
+        ]));
+        expect(plain.normalizedTags).not.toContain('scope:organization:org_1:model:Equipment');
+    });
+
+    test('publishes only scoped model and entity tags for a resolved Equipment write', async () => {
+        const config = normalizeConfig({ schema: cacheSchema, models: cacheModels });
+
+        await handleWrite({
+            model: 'Equipment',
+            operation: 'upsert',
+            args: {
+                where: { id: 'eq_1' },
+                create: { id: 'eq_1', organizationId: 'org_1' },
+                update: { name: 'Pump' },
+            },
+            cleanedArgs: {
+                where: { id: 'eq_1' },
+                create: { id: 'eq_1', organizationId: 'org_1' },
+                update: { organizationId: 'org_1' },
+            },
+            query: vi.fn().mockResolvedValue({ id: 'eq_1', organizationId: 'org_1' }),
+            cacheOptions: undefined,
+            config,
+            redisAdapter: redis,
+        });
+
+        expect(redis.store.get(getTagVersionKey('scope:organization:org_1:model:Equipment', config))).toBe('1');
+        expect(redis.store.get(getTagVersionKey('scope:organization:org_1:entity:Equipment:eq_1', config))).toBe('1');
+        expect([...redis.store.keys()]).not.toContain(getTagVersionKey('global:model:Equipment', config));
+        expect([...redis.store.keys()].some((key) => key.includes(':root'))).toBe(false);
+    });
+
+    test('publishes global fallback and warns once when write tenant scope is unresolved', async () => {
+        const warn = vi.fn();
+        const config = normalizeConfig({
+            schema: cacheSchema,
+            models: cacheModels,
+            logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
+        });
+
+        await handleWrite({
+            model: 'Equipment',
+            operation: 'update',
+            args: { where: { id: 'eq_1' }, data: { name: 'Pump' } },
+            cleanedArgs: { where: { id: 'eq_1' }, data: { name: 'Pump' } },
+            query: vi.fn().mockResolvedValue({ id: 'eq_1' }),
+            cacheOptions: undefined,
+            config,
+            redisAdapter: redis,
+        });
+
+        expect(redis.store.get(getTagVersionKey('global:model:Equipment', config))).toBe('1');
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn).toHaveBeenCalledWith(
+            { model: 'Equipment', operation: 'update', fallbackModels: ['Equipment'] },
+            'Tenant identity unavailable after write; invalidating the model-wide cache fallback',
+        );
+    });
+
+    test('bypasses unsupported reads with a bounded reason and dependency count', async () => {
+        const onCacheEvent = vi.fn();
+        const config = normalizeConfig({ schema: cacheSchema, models: cacheModels, metrics: { onCacheEvent } });
+        const query = vi.fn().mockResolvedValue([]);
+        const args = { where: { organizationId: 'org_1' }, include: { missingRelation: true } };
+
+        await readThroughCache({
+            model: 'WorkOrder',
+            operation: 'findMany',
+            args,
+            cleanedArgs: args,
+            query,
+            cacheOptions: { ttlSeconds: 60 },
+            config,
+            redisAdapter: redis,
+        });
+
+        expect(query).toHaveBeenCalledWith(args);
+        expect(onCacheEvent).toHaveBeenCalledWith({
+            model: 'WorkOrder',
+            operation: 'findMany',
+            result: 'bypass',
+            path: 'bypass',
+            reason: 'relation-field-unknown',
+            dependencyCount: 1,
+        });
+    });
+
+    test('merges explicit tags by default and replaces inferred tags without losing tenant identity', () => {
+        const config = normalizeConfig({ schema: cacheSchema, models: cacheModels });
+        const args = { where: { organizationId: 'org_1' }, include: { equipment: true } };
+        const merged = prepareRead('WorkOrder', 'findMany', args, args, { ttlSeconds: 60, tags: ['custom:read'] }, config);
+        const replaced = prepareRead(
+            'WorkOrder',
+            'findMany',
+            args,
+            args,
+            { ttlSeconds: 60, tags: ['custom:read'], mergeTags: false },
+            config,
+        );
+
+        expect(merged.normalizedTags).toEqual(expect.arrayContaining([
+            'custom:read',
+            'scope:organization:org_1:model:Equipment',
+        ]));
+        expect(replaced.normalizedTags).toEqual(['custom:read']);
+        expect(replaced.tenantScope).toEqual(['organization:org_1']);
+    });
+
     test('rejects normalized configs at the public boundary', () => {
         const normalized = normalizeConfig({ schema: cacheSchema, models: cacheModels });
 
@@ -444,7 +581,7 @@ describe('readThroughCache', () => {
     });
 
     test('misses, calls the query, and populates the cache', async () => {
-        const config = makeConfig({ tenantKeys: ['tenantId'] });
+        const config = makeConfig();
         const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);
 
         const result = await readThroughCache({
@@ -468,8 +605,8 @@ describe('readThroughCache', () => {
         const params = {
             model: 'Widget',
             operation: 'findMany',
-            args: { where: { sequence: 42n } },
-            cleanedArgs: { where: { sequence: 42n } },
+            args: { where: { id: 42n } },
+            cleanedArgs: { where: { id: 42n } },
             query,
             cacheOptions: {},
             config: makeConfig(),
@@ -484,7 +621,7 @@ describe('readThroughCache', () => {
     });
 
     test('serves the second identical read from cache without calling the query', async () => {
-        const config = makeConfig({ tenantKeys: ['tenantId'] });
+        const config = makeConfig();
         const query = vi.fn().mockResolvedValue([{ id: 'w1' }]);
         const params = {
             model: 'Widget',
@@ -705,7 +842,6 @@ describe('readThroughCache', () => {
         const onCacheEvent = vi.fn();
         const warn = vi.fn();
         const config = makeConfig({
-            tenantKeys: ['tenantId'],
             logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
             metrics: { onCacheEvent },
         });
@@ -914,327 +1050,47 @@ describe('readThroughCache', () => {
 });
 
 describe('handleWrite', () => {
-    test('runs the write then bumps the resolved tag versions', async () => {
-        const config = makeConfig({ tenantKeys: ['tenantId'] });
-        const query = vi.fn().mockResolvedValue({ id: 'w1' });
-
-        const result = await handleWrite({
-            model: 'Widget',
+    test('runs the write then bumps resolved model and entity tags', async () => {
+        const config = normalizeConfig({ schema: cacheSchema, models: cacheModels });
+        await handleWrite({
+            model: 'Equipment',
             operation: 'update',
-            args: { where: { tenantId: 't1', id: 'w1' } },
-            cleanedArgs: { where: { tenantId: 't1', id: 'w1' } },
-            query,
+            args: { where: { id: 'eq_1', organizationId: 'org_1' }, data: { name: 'Pump' } },
+            cleanedArgs: { where: { id: 'eq_1', organizationId: 'org_1' }, data: { name: 'Pump' } },
+            query: vi.fn().mockResolvedValue({ id: 'eq_1', organizationId: 'org_1' }),
             cacheOptions: undefined,
             config,
             redisAdapter: redis,
         });
-
-        expect(result).toEqual({ id: 'w1' });
-        expect(redis.store.get(getTagVersionKey('tenant:t1:model:Widget', config))).toBe('1');
+        expect(redis.store.get(getTagVersionKey('scope:organization:org_1:model:Equipment', config))).toBe('1');
+        expect(redis.store.get(getTagVersionKey('scope:organization:org_1:entity:Equipment:eq_1', config))).toBe('1');
     });
 
-    test('a write invalidates a previously cached read of the same tenant and model', async () => {
-        const config = makeConfig({ tenantKeys: ['tenantId'] });
-        const readQuery = vi.fn().mockResolvedValue([{ id: 'w1' }]);
+    test('does not invalidate a relation-independent read after a related model write', async () => {
+        const config = normalizeConfig({ schema: cacheSchema, models: cacheModels });
+        const readQuery = vi.fn().mockResolvedValue([{ id: 'w1', organizationId: 'org_1' }]);
         const readParams = {
-            model: 'Widget',
+            model: 'WorkOrder',
             operation: 'findMany',
-            args: { where: { tenantId: 't1' } },
-            cleanedArgs: { where: { tenantId: 't1' } },
+            args: { where: { organizationId: 'org_1' } },
+            cleanedArgs: { where: { organizationId: 'org_1' } },
             query: readQuery,
             cacheOptions: { ttlSeconds: 60 },
             config,
             redisAdapter: redis,
         };
-
-        await readThroughCache(readParams);
-        expect(readQuery).toHaveBeenCalledTimes(1);
-
-        await handleWrite({
-            model: 'Widget',
-            operation: 'update',
-            args: { where: { tenantId: 't1', id: 'w1' } },
-            cleanedArgs: { where: { tenantId: 't1', id: 'w1' } },
-            query: vi.fn().mockResolvedValue({ id: 'w1' }),
-            cacheOptions: undefined,
-            config,
-            redisAdapter: redis,
-        });
-
-        await readThroughCache(readParams);
-
-        // The tag version bump changed the key, so the read had to hit the database again.
-        expect(readQuery).toHaveBeenCalledTimes(2);
-    });
-
-    test('update and delete by ID use the returned tenant identity', async () => {
-        const config = makeConfig({ tenantKeys: ['tenantId'] });
-        const readQuery = vi.fn().mockResolvedValue([{ id: 'w1', tenantId: 't1', name: 'before' }]);
-        const readParams = {
-            model: 'Widget',
-            operation: 'findMany',
-            args: { where: { tenantId: 't1' } },
-            cleanedArgs: { where: { tenantId: 't1' } },
-            query: readQuery,
-            cacheOptions: { ttlSeconds: 60 },
-            config,
-            redisAdapter: redis,
-        };
-
-        await readThroughCache(readParams);
-
-        await handleWrite({
-            model: 'Widget',
-            operation: 'update',
-            args: { where: { id: 'w1' }, data: { name: 'after' } },
-            cleanedArgs: { where: { id: 'w1' }, data: { name: 'after' } },
-            query: vi.fn().mockResolvedValue({ id: 'w1', tenantId: 't1', name: 'after' }),
-            cacheOptions: undefined,
-            config,
-            redisAdapter: redis,
-        });
-
-        await readThroughCache(readParams);
-        expect(readQuery).toHaveBeenCalledTimes(2);
-
-        await readThroughCache(readParams);
-        readQuery.mockResolvedValue([]);
-
-        await handleWrite({
-            model: 'Widget',
-            operation: 'delete',
-            args: { where: { id: 'w1' } },
-            cleanedArgs: { where: { id: 'w1' } },
-            query: vi.fn().mockResolvedValue({ id: 'w1', tenantId: 't1', name: 'after' }),
-            cacheOptions: undefined,
-            config,
-            redisAdapter: redis,
-        });
-
-        const afterDelete = await readThroughCache(readParams);
-        expect(afterDelete).toEqual([]);
-        expect(readQuery).toHaveBeenCalledTimes(3);
-    });
-
-    test('uses a model-wide fallback when a write cannot determine the tenant', async () => {
-        const config = makeConfig({ tenantKeys: ['tenantId'] });
-        const readQuery = vi.fn().mockResolvedValue([{ id: 'w1', tenantId: 't1' }]);
-        const readParams = {
-            model: 'Widget',
-            operation: 'findMany',
-            args: { where: { tenantId: 't1' } },
-            cleanedArgs: { where: { tenantId: 't1' } },
-            query: readQuery,
-            cacheOptions: { ttlSeconds: 60 },
-            config,
-            redisAdapter: redis,
-        };
-
-        await readThroughCache(readParams);
-
-        await handleWrite({
-            model: 'Widget',
-            operation: 'update',
-            args: { where: { id: 'w1' }, data: { name: 'after' }, select: { id: true } },
-            cleanedArgs: { where: { id: 'w1' }, data: { name: 'after' }, select: { id: true } },
-            query: vi.fn().mockResolvedValue({ id: 'w1' }),
-            cacheOptions: undefined,
-            config,
-            redisAdapter: redis,
-        });
-
-        await readThroughCache(readParams);
-        expect(readQuery).toHaveBeenCalledTimes(2);
-    });
-
-    test('a write to an unrelated tenant does not invalidate in precise mode', async () => {
-        const config = makeConfig({ tenantKeys: ['tenantId'], tenantPrecision: true });
-        const readQuery = vi.fn().mockResolvedValue([{ id: 'w1' }]);
-        const readParams = {
-            model: 'Widget',
-            operation: 'findMany',
-            args: { where: { tenantId: 't1' } },
-            cleanedArgs: { where: { tenantId: 't1' } },
-            query: readQuery,
-            cacheOptions: { ttlSeconds: 60 },
-            config,
-            redisAdapter: redis,
-        };
-
         await readThroughCache(readParams);
         await handleWrite({
-            model: 'Widget',
-            operation: 'update',
-            args: { where: { tenantId: 't2', id: 'w2' } },
-            cleanedArgs: { where: { tenantId: 't2', id: 'w2' } },
-            query: vi.fn().mockResolvedValue({ id: 'w2' }),
-            cacheOptions: undefined,
-            config,
-            redisAdapter: redis,
-        });
-        await readThroughCache(readParams);
-
-        expect(readQuery).toHaveBeenCalledTimes(1);
-    });
-
-    test('bypasses an over-cap tenant-precise read so a tail-tenant write cannot leave stale data reachable', async () => {
-        const tenantIds = Array.from({ length: 20 }, (_, index) => `t${index}`);
-        const entityIds = Array.from({ length: 20 }, (_, index) => `w${index}`);
-        const onCacheEvent = vi.fn();
-        const warn = vi.fn();
-        const config = makeConfig({
-            tenantKeys: ['tenantId'],
-            tenantPrecision: true,
-            maxTagsPerQuery: 5,
-            metrics: { onCacheEvent },
-            logger: { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() },
-        });
-        const args = {
-            where: {
-                tenantId: { in: tenantIds },
-                id: { in: entityIds },
-            },
-        };
-        const readQuery = vi
-            .fn()
-            .mockResolvedValueOnce([{ id: 'w19', tenantId: 't19', name: 'initial' }])
-            .mockResolvedValueOnce([{ id: 'w19', tenantId: 't19', name: 'updated' }]);
-        const readParams = {
-            model: 'Widget',
-            operation: 'findMany',
-            args,
-            cleanedArgs: args,
-            query: readQuery,
-            cacheOptions: { ttlSeconds: 60 },
-            config,
-            redisAdapter: redis,
-        };
-
-        await expect(readThroughCache(readParams)).resolves.toEqual([{ id: 'w19', tenantId: 't19', name: 'initial' }]);
-        await handleWrite({
-            model: 'Widget',
-            operation: 'update',
-            args: { where: { tenantId: 't19', id: 'w19' }, data: { name: 'updated' } },
-            cleanedArgs: { where: { tenantId: 't19', id: 'w19' }, data: { name: 'updated' } },
-            query: vi.fn().mockResolvedValue({ id: 'w19', tenantId: 't19', name: 'updated' }),
-            cacheOptions: undefined,
-            config,
-            redisAdapter: redis,
-        });
-        await expect(readThroughCache(readParams)).resolves.toEqual([{ id: 'w19', tenantId: 't19', name: 'updated' }]);
-
-        expect(readQuery).toHaveBeenCalledTimes(2);
-        expect([...redis.store.keys()].some((key) => key.includes(':qry:'))).toBe(false);
-        expect(onCacheEvent).toHaveBeenCalledTimes(2);
-        expect(onCacheEvent).toHaveBeenNthCalledWith(1, {
-            model: 'Widget',
-            operation: 'findMany',
-            result: 'bypass',
-            path: 'bypass',
-            reason: 'tenant-tag-limit',
-        });
-        expect(onCacheEvent).toHaveBeenNthCalledWith(2, {
-            model: 'Widget',
-            operation: 'findMany',
-            result: 'bypass',
-            path: 'bypass',
-            reason: 'tenant-tag-limit',
-        });
-        expect(warn).toHaveBeenCalledWith(
-            { model: 'Widget', operation: 'findMany', reason: 'tenant-tag-limit' },
-            'Cache read bypassed safely',
-        );
-        expect(warn.mock.calls.flat()).not.toContain(args);
-    });
-
-    test('a write to an unrelated tenant invalidates under the safe default', async () => {
-        const config = makeConfig({ tenantKeys: ['tenantId'] });
-        const readQuery = vi.fn().mockResolvedValue([{ id: 'w1' }]);
-        const readParams = {
-            model: 'Widget',
-            operation: 'findMany',
-            args: { where: { tenantId: 't1' } },
-            cleanedArgs: { where: { tenantId: 't1' } },
-            query: readQuery,
-            cacheOptions: { ttlSeconds: 60 },
-            config,
-            redisAdapter: redis,
-        };
-
-        await readThroughCache(readParams);
-        await handleWrite({
-            model: 'Widget',
-            operation: 'update',
-            args: { where: { tenantId: 't2', id: 'w2' } },
-            cleanedArgs: { where: { tenantId: 't2', id: 'w2' } },
-            query: vi.fn().mockResolvedValue({ id: 'w2' }),
-            cacheOptions: undefined,
-            config,
-            redisAdapter: redis,
-        });
-        await readThroughCache(readParams);
-
-        expect(readQuery).toHaveBeenCalledTimes(2);
-    });
-
-    test('warns when precise-mode write tenant identity is unavailable', async () => {
-        const warn = vi.fn();
-        const config = makeConfig({
-            tenantKeys: ['tenantId'],
-            tenantPrecision: true,
-            logger: {
-                debug: vi.fn(),
-                info: vi.fn(),
-                warn,
-                error: vi.fn(),
-            },
-        });
-
-        const result = await handleWrite({
-            model: 'Widget',
-            operation: 'update',
-            args: { where: { id: 'w1' } },
-            cleanedArgs: { where: { id: 'w1' } },
-            query: vi.fn().mockResolvedValue({ id: 'w1' }),
-            cacheOptions: undefined,
-            config,
-            redisAdapter: redis,
-        });
-
-        expect(result).toEqual({ id: 'w1' });
-        expect(warn).toHaveBeenCalledWith(
-            { model: 'Widget', operation: 'update' },
-            'Tenant identity unavailable after write; invalidating the model-wide cache fallback',
-        );
-    });
-
-    test('a dependency tag propagates invalidation across models', async () => {
-        const config = makeConfig({ tenantKeys: ['tenantId'], dependencyTags: { Part: ['Widget'] } });
-        const readQuery = vi.fn().mockResolvedValue([{ id: 'w1' }]);
-        const readParams = {
-            model: 'Widget',
-            operation: 'findMany',
-            args: { where: { tenantId: 't1' } },
-            cleanedArgs: { where: { tenantId: 't1' } },
-            query: readQuery,
-            cacheOptions: { ttlSeconds: 60 },
-            config,
-            redisAdapter: redis,
-        };
-
-        await readThroughCache(readParams);
-        await handleWrite({
-            model: 'Part',
+            model: 'Equipment',
             operation: 'create',
-            args: { data: { tenantId: 't1', label: 'p1' } },
-            cleanedArgs: { data: { tenantId: 't1', label: 'p1' } },
-            query: vi.fn().mockResolvedValue({ id: 'p1' }),
+            args: { data: { id: 'eq_1', organizationId: 'org_1' } },
+            cleanedArgs: { data: { id: 'eq_1', organizationId: 'org_1' } },
+            query: vi.fn().mockResolvedValue({ id: 'eq_1', organizationId: 'org_1' }),
             cacheOptions: undefined,
             config,
             redisAdapter: redis,
         });
         await readThroughCache(readParams);
-
-        expect(readQuery).toHaveBeenCalledTimes(2);
+        expect(readQuery).toHaveBeenCalledTimes(1);
     });
 });

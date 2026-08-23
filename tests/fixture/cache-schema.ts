@@ -36,10 +36,40 @@ export const cacheSchema = {
             primaryKey: ['id'],
             uniqueKeys: [['id']],
         },
+        WorkOrder: {
+            fields: {
+                id: { kind: 'scalar', type: 'String', isId: true, isUnique: true },
+                organizationId: { kind: 'scalar', type: 'String', isId: false, isUnique: false },
+                equipment: {
+                    kind: 'relation',
+                    target: 'Equipment',
+                    isList: true,
+                    relationName: 'EquipmentToWorkOrder',
+                },
+            },
+            primaryKey: ['id'],
+            uniqueKeys: [['id']],
+        },
+        Equipment: {
+            fields: {
+                id: { kind: 'scalar', type: 'String', isId: true, isUnique: true },
+                organizationId: { kind: 'scalar', type: 'String', isId: false, isUnique: false },
+                workOrders: {
+                    kind: 'relation',
+                    target: 'WorkOrder',
+                    isList: true,
+                    relationName: 'EquipmentToWorkOrder',
+                },
+            },
+            primaryKey: ['id'],
+            uniqueKeys: [['id']],
+        },
     },
 } as const satisfies CacheSchemaDescriptor;
 
 export const cacheModels = {
     Widget: { tenant: { field: 'tenantId', namespace: 'tenant' } },
     Part: { tenant: { field: 'tenantId', namespace: 'tenant' } },
+    WorkOrder: { tenant: { field: 'organizationId', namespace: 'organization' } },
+    Equipment: { tenant: { field: 'organizationId', namespace: 'organization' } },
 } as const satisfies CacheModelConfigs<typeof cacheSchema>;

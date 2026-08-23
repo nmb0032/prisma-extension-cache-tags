@@ -30,12 +30,6 @@ export function normalizeConfig<TSchema extends CacheSchemaDescriptor>(
     config: CacheTagsConfig<TSchema>,
 ): NormalizedCacheConfig<TSchema> {
     const analysis = createAnalysisContext(config.schema, config.models);
-    const tenantKeys = Array.from(
-        new Set(
-            Object.values(config.models)
-                .flatMap((model) => (model && model.tenant !== false ? [model.tenant.field] : [])),
-        ),
-    );
 
     return {
         ...DEFAULT_RUNTIME_CONFIG,
@@ -45,12 +39,6 @@ export function normalizeConfig<TSchema extends CacheSchemaDescriptor>(
             ...config.stampede,
         },
         analysis,
-        // Legacy resolver scaffolding is intentionally internal and will be removed with src/tags.ts in Task 6.
-        dependencyTags: {},
-        inferTags: true,
-        tenantKeys,
-        tenantPrecision: false,
-        entityKeys: ['id'],
         logger: config.logger ?? noopLogger,
         metrics: config.metrics ?? noopMetrics,
     };

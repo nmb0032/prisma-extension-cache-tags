@@ -5,8 +5,14 @@ import { describe, expect, test } from 'vitest';
 import type { GeneratorOptions } from '@prisma/generator-helper';
 import { buildCacheSchemaDescriptor } from '../../src/generator/descriptor';
 import { renderCacheSchemaModule, writeGeneratedCacheSchema } from '../../src/generator/render';
+import type { CacheSchemaDescriptor } from '../../src';
 
 type Datamodel = GeneratorOptions['dmmf']['datamodel'];
+
+const rootSchemaContract: CacheSchemaDescriptor = {
+    formatVersion: 1,
+    models: {},
+};
 
 const datamodelFixture = {
     models: [
@@ -331,6 +337,10 @@ describe('buildCacheSchemaDescriptor', () => {
 });
 
 describe('renderCacheSchemaModule', () => {
+    test('exports the schema descriptor contract from the package root', () => {
+        expect(rootSchemaContract).toEqual({ formatVersion: 1, models: {} });
+    });
+
     test('renders a typed literal descriptor', () => {
         const descriptor = buildCacheSchemaDescriptor(datamodelFixture);
         const rendered = renderCacheSchemaModule(descriptor);

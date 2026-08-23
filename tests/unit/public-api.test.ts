@@ -5,6 +5,7 @@ describe('public api', () => {
     test('exports the extension factory and invalidation wrapper', () => {
         expect(typeof api.createCacheTagsExtension).toBe('function');
         expect(typeof api.withCacheInvalidation).toBe('function');
+        expect(typeof api.invalidateScope).toBe('function');
     });
 
     test('tag helpers produce the documented formats', () => {

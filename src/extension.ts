@@ -677,7 +677,7 @@ export function createCacheTagsExtension<TSchema extends CacheSchemaDescriptor>(
                     await bumpTagVersions(tags, finalConfig, redisAdapter);
                 } catch (error) {
                     finalConfig.logger.error(
-                        { tags, error: (error as Error).message },
+                        { tagCount: tags.length, error: (error as Error).message },
                         'Cache invalidation failed after transaction commit',
                     );
                 }

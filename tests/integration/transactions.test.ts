@@ -1,8 +1,10 @@
 import { afterAll, beforeEach, describe, expect, test } from 'vitest';
 import { Prisma } from '../fixture/generated/client';
+import { invalidateScope } from '../../src';
 import { normalizeConfig } from '../../src/config';
 import { createNodeRedisAdapter } from '../../src/adapters/node-redis';
 import { getTagVersionKey } from '../../src/keys';
+import { scopeRootTag } from '../../src/tag-format';
 import { createCachedClient, createQueryCounter, createRedis } from './helpers';
 import { cacheModels, cacheSchema } from '../fixture/cache-schema';
 
@@ -12,7 +14,14 @@ const prisma = createCachedClient(redis, counter);
 const redisAdapter = createNodeRedisAdapter(redis);
 const fallbackCounter = createQueryCounter();
 const fallbackPrisma = createCachedClient(redis, fallbackCounter, {}, {}, createNodeRedisAdapter(redis, { optimized: false }));
-const tagVersionKey = getTagVersionKey('tenant:t1:model:Widget', normalizeConfig({ schema: cacheSchema, models: cacheModels }));
+const tagVersionKey = getTagVersionKey(
+    'scope:tenant:t1:model:Widget',
+    normalizeConfig({ schema: cacheSchema, models: cacheModels }),
+);
+const scopeRootVersionKey = getTagVersionKey(
+    scopeRootTag({ namespace: 'tenant', id: 't1' }),
+    normalizeConfig({ schema: cacheSchema, models: cacheModels }),
+);
 
 function asTransactionBatch(operations: Promise<unknown>[]): Prisma.PrismaPromise<unknown>[] {
     // Query extensions expose Promise at the type level, while Prisma executes these lazy values as a batch.
@@ -90,6 +99,24 @@ describe('transaction-aware invalidation', () => {
         expect(Number(await redisAdapter.getString(tagVersionKey))).toBe(tagVersionBeforeTransaction + 1);
         const after = await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
         expect(after).toHaveLength(3);
+    });
+
+    test('a committed transaction flushes one explicit scope invalidation after repeated requests', async () => {
+        await prisma.$transaction(async (tx) => {
+            await invalidateScope({ namespace: 'tenant', id: 't1' }, redisAdapter, {
+                schema: cacheSchema,
+                models: cacheModels,
+            });
+            await invalidateScope({ namespace: 'tenant', id: 't1' }, redisAdapter, {
+                schema: cacheSchema,
+                models: cacheModels,
+            });
+
+            expect(await redisAdapter.getString(scopeRootVersionKey)).toBeNull();
+            await tx.widget.count();
+        });
+
+        expect(await redisAdapter.getString(scopeRootVersionKey)).toBe('1');
     });
 
     test('a rolled-back transaction does NOT invalidate the cache', async () => {

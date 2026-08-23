@@ -235,7 +235,7 @@ describe('deferred invalidation context', () => {
         ).resolves.toBe('completed');
 
         expect(error).toHaveBeenCalledWith(
-            { tags: ['failing-tag'], error: 'redis down' },
+            { tagCount: 1, error: 'redis down' },
             'Deferred cache invalidation failed',
         );
     });

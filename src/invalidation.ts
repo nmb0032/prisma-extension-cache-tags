@@ -49,10 +49,10 @@ export async function bumpTagVersions(tags: string[], config: NormalizedCacheCon
             if (versions.length !== uniqueTags.length) {
                 throw new Error('Optimized invalidation returned an unexpected version count');
             }
-            uniqueTags.forEach((tag, index) => {
+            uniqueTags.forEach((_, index) => {
                 const version = versions[index]!;
                 config.logger.debug(
-                    { tag, key: getTagVersionKey(tag, config), version, ttl: versionTtlSeconds },
+                    { version, ttl: versionTtlSeconds, tagCount: uniqueTags.length },
                     'Bumped cache tag version',
                 );
             });
@@ -76,7 +76,7 @@ export async function bumpTagVersions(tags: string[], config: NormalizedCacheCon
             const key = getTagVersionKey(tag, config);
             const version = await redisAdapter.increment(key, 1);
             await redisAdapter.expire(key, versionTtlSeconds);
-            config.logger.debug({ tag, key, version, ttl: versionTtlSeconds }, 'Bumped cache tag version');
+            config.logger.debug({ version, ttl: versionTtlSeconds, tagCount: uniqueTags.length }, 'Bumped cache tag version');
         }),
     );
 }
@@ -104,7 +104,7 @@ export async function withCacheInvalidation<T, TSchema extends CacheSchemaDescri
         try {
             await bumpTagVersions(tags, normalized, redisAdapter);
         } catch (error) {
-            normalized.logger.error({ tags, error: (error as Error).message }, 'Deferred cache invalidation failed');
+            normalized.logger.error({ tagCount: tags.length, error: (error as Error).message }, 'Deferred cache invalidation failed');
         }
     });
 }

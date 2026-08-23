@@ -2,6 +2,7 @@ export { CanonicalizationError, canonicalizePrismaValue, hashCanonicalValue } fr
 export { createCacheTags } from './cache-tags';
 export { createCacheTagsExtension } from './extension';
 export type { PreparedRead } from './extension';
+export { invalidateScope } from './scope-invalidation';
 export { withCacheInvalidation } from './invalidation';
 export { buildVersionedCacheKey, createVersionToken, prepareCacheKey } from './keys';
 export { createOptimizedRedisPrimitives } from './optimized';

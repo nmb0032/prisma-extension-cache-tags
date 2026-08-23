@@ -21,6 +21,9 @@
     "main": "./dist/index.js",
     "module": "./dist/index.mjs",
     "types": "./dist/index.d.ts",
+    "bin": {
+        "prisma-cache-tags-generator": "./dist/generator.js"
+    },
     "typesVersions": {
         "*": {
             "node-redis": [
@@ -92,6 +95,7 @@
         "db:down": "docker compose down -v"
     },
     "dependencies": {
+        "@prisma/generator-helper": "7.9.1",
         "superjson": "^2.2.6"
     },
     "peerDependencies": {

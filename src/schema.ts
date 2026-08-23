@@ -1,3 +1,5 @@
+import type { ReadDependencyResolver } from './types';
+
 export const CACHE_SCHEMA_FORMAT_VERSION = 1 as const;
 
 export type CacheFieldDescriptor =
@@ -34,8 +36,8 @@ export interface CacheScope {
 }
 
 export type CacheModelScopeConfig =
-    | { tenant: false }
-    | { tenant: { field: string; namespace: string } };
+    | { tenant: false; readDependencies?: ReadDependencyResolver }
+    | { tenant: { field: string; namespace: string }; readDependencies?: ReadDependencyResolver };
 
 export type CacheModelConfig = CacheModelScopeConfig;
 
@@ -49,6 +51,7 @@ export interface IndexedModel {
         | { kind: 'global' }
         | { kind: 'tenant'; field: string; namespace: string }
         | { kind: 'unconfigured' };
+    readDependencies?: ReadDependencyResolver;
 }
 
 export interface AnalysisContext {
@@ -205,7 +208,12 @@ export function createAnalysisContext<TSchema extends CacheSchemaDescriptor>(
             };
         }
 
-        models[modelName] = { descriptor, relations, scope };
+        models[modelName] = {
+            descriptor,
+            relations,
+            scope,
+            ...(config?.readDependencies ? { readDependencies: config.readDependencies } : {}),
+        };
     }
 
     return { schema, models };

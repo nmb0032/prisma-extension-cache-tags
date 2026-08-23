@@ -5,9 +5,22 @@ export type { PreparedRead } from './extension';
 export { withCacheInvalidation } from './invalidation';
 export { buildVersionedCacheKey, createVersionToken, prepareCacheKey } from './keys';
 export { createOptimizedRedisPrimitives } from './optimized';
+export { analyzePrimaryScope, analyzeReadTags } from './read-analysis';
+export { resolveModelScopes, serializeScope } from './scope-resolution';
 export { deserializeCacheEnvelope, matchesCacheIdentity, serializeCacheEnvelope } from './serialization';
-export type { CacheSchemaDescriptor } from './schema';
 export type {
+    AnalysisContext,
+    CacheFieldDescriptor,
+    CacheModelConfig,
+    CacheModelConfigs,
+    CacheModelDescriptor,
+    CacheModelScopeConfig,
+    CacheSchemaDescriptor,
+    CacheScope,
+    IndexedModel,
+} from './schema';
+export type {
+    CacheBypassReason,
     CachedEnvelopeV2,
     CacheScriptEvent,
     CacheDependencyResolver,
@@ -25,4 +38,7 @@ export type {
     OptimizedScriptCallbacks,
     PreparedCacheKey,
     RedisAdapter,
+    ReadAnalysis,
+    ReadDependency,
+    ReadDependencyResolver,
 } from './types';

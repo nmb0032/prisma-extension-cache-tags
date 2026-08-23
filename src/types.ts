@@ -43,6 +43,39 @@ export interface OptimizedRedisPrimitives {
     bumpTagVersions(keys: string[], ttlSeconds: number, callbacks?: OptimizedScriptCallbacks): Promise<number[]>;
 }
 
+import type { CacheSchemaDescriptor, CacheScope } from './schema';
+
+export type CacheBypassReason =
+    | 'model-scope-unconfigured'
+    | 'tenant-scope-missing'
+    | 'query-shape-unsupported'
+    | 'relation-field-unknown'
+    | 'cross-namespace-scope-unknown'
+    | 'dependency-tag-limit'
+    | 'canonicalization'
+    | 'identity-mismatch'
+    | 'invalid-envelope';
+
+export type ReadDependency =
+    | { model: string; scope?: CacheScope }
+    | { tag: string };
+
+export type ReadDependencyResolver = (context: {
+    model: string;
+    operation: string;
+    args: unknown;
+    scopes: readonly CacheScope[];
+    schema: CacheSchemaDescriptor;
+}) => readonly ReadDependency[];
+
+export interface ReadAnalysis {
+    cacheable: boolean;
+    tags: string[];
+    tenantScope: string[];
+    dependencies: string[];
+    bypassReason?: CacheBypassReason;
+}
+
 /**
  * Redis adapter interface for cache operations
  *

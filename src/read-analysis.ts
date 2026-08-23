@@ -118,6 +118,13 @@ function directScopes(
     return resolveDirectModelScopes({ model, values: [value], context });
 }
 
+function primaryPredicateValues(args: unknown): unknown[] {
+    if (!isRecord(args)) {
+        return [];
+    }
+    return [args.where, args.having];
+}
+
 function relationScopes(
     source: IndexedModel,
     targetModel: string,
@@ -361,7 +368,11 @@ function baseAnalysis(
     if (indexed.scope.kind === 'global') {
         return { primaryScopes: [] };
     }
-    const primaryScopes = resolveDirectModelScopes({ model, values: [args], context });
+    const primaryScopes = resolveDirectModelScopes({
+        model,
+        values: primaryPredicateValues(args),
+        context,
+    });
     if (primaryScopes.length === 0) {
         return {
             primaryScopes,

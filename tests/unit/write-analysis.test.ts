@@ -129,6 +129,24 @@ describe('narrow write publication analysis', () => {
         expect(result.globalFallbackModels).toEqual(['Equipment']);
     });
 
+    test('does not infer a returned scope from projection or ordering-shaped data', () => {
+        const result = analyzeWriteTags({
+            model: 'Equipment',
+            operation: 'update',
+            args: { where: { id: '123' }, data: { serial: 'x' } },
+            result: {
+                id: '123',
+                select: { organizationId: 'org_fake' },
+                orderBy: { organizationId: 'asc' },
+            },
+            context,
+        });
+
+        expect(result.tags).toEqual(['global:model:Equipment']);
+        expect(result.tenantScope).toEqual([]);
+        expect(result.globalFallbackModels).toEqual(['Equipment']);
+    });
+
     test('handles tenant moves with separate old and new evidence', () => {
         const result = analyzeWriteTags({
             model: 'Equipment',

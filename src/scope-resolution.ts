@@ -65,21 +65,31 @@ function addTenantValues(value: unknown, scope: { namespace: string }, output: C
     }
 }
 
-const SAME_MODEL_WRAPPERS = new Set([
+const PREDICATE_WRAPPERS = new Set([
     'where',
     'having',
     'AND',
     'OR',
     'NOT',
-    'select',
-    'include',
-    'orderBy',
-    '_count',
     'some',
     'every',
     'none',
     'is',
     'isNot',
+]);
+
+const PROJECTION_WRAPPERS = new Set([
+    'select',
+    'include',
+    'orderBy',
+    '_count',
+]);
+
+const IGNORED_QUERY_CONTEXTS = new Set([
+    'distinct',
+    'cursor',
+    'skip',
+    'take',
 ]);
 
 function walkScopes(
@@ -89,6 +99,7 @@ function walkScopes(
     output: CacheScope[],
     visited: WeakSet<object>,
     followRelations: boolean,
+    collectTenantEvidence: boolean,
 ): void {
     if (value && typeof value === 'object') {
         if (visited.has(value)) {
@@ -99,7 +110,7 @@ function walkScopes(
 
     if (Array.isArray(value)) {
         for (const item of value) {
-            walkScopes(model, item, context, output, visited, followRelations);
+            walkScopes(model, item, context, output, visited, followRelations, collectTenantEvidence);
         }
         return;
     }
@@ -113,28 +124,38 @@ function walkScopes(
     }
 
     for (const [key, child] of Object.entries(value)) {
-        if (indexed.scope.kind === 'tenant' && key === indexed.scope.field) {
+        if (collectTenantEvidence && indexed.scope.kind === 'tenant' && key === indexed.scope.field) {
             addTenantValues(child, indexed.scope, output);
             continue;
         }
 
         const relation = indexed.relations[key];
         if (followRelations && relation) {
-            walkScopes(relation.target, child, context, output, visited, true);
+            walkScopes(relation.target, child, context, output, visited, true, collectTenantEvidence);
             continue;
         }
 
         if (
-            indexed.scope.kind === 'tenant'
+            collectTenantEvidence
+            && indexed.scope.kind === 'tenant'
             && !relation
             && isCompoundScopePredicate(indexed.descriptor, indexed.scope.field, key, child)
         ) {
-            walkScopes(model, child, context, output, visited, followRelations);
+            walkScopes(model, child, context, output, visited, followRelations, true);
             continue;
         }
 
-        if (SAME_MODEL_WRAPPERS.has(key)) {
-            walkScopes(model, child, context, output, visited, followRelations);
+        if (IGNORED_QUERY_CONTEXTS.has(key)) {
+            continue;
+        }
+
+        if (PREDICATE_WRAPPERS.has(key)) {
+            walkScopes(model, child, context, output, visited, followRelations, true);
+            continue;
+        }
+
+        if (PROJECTION_WRAPPERS.has(key)) {
+            walkScopes(model, child, context, output, visited, followRelations, false);
         }
     }
 }
@@ -159,7 +180,7 @@ export function resolveModelScopes(input: {
     const scopes: CacheScope[] = [];
     const visited = new WeakSet<object>();
     for (const value of input.values) {
-        walkScopes(input.model, value, input.context, scopes, visited, true);
+        walkScopes(input.model, value, input.context, scopes, visited, true, true);
     }
     return dedupeScopes(scopes);
 }
@@ -172,7 +193,7 @@ export function resolveDirectModelScopes(input: {
     const scopes: CacheScope[] = [];
     const visited = new WeakSet<object>();
     for (const value of input.values) {
-        walkScopes(input.model, value, input.context, scopes, visited, false);
+        walkScopes(input.model, value, input.context, scopes, visited, false, true);
     }
     return dedupeScopes(scopes);
 }

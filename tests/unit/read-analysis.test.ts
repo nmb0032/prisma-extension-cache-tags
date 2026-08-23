@@ -246,6 +246,55 @@ describe('schema-aware read analysis', () => {
         });
     });
 
+    test('does not infer primary scope from projections, ordering, or pagination', () => {
+        const ignoredContexts = [
+            { organizationId: 'org_top_level' },
+            { select: { organizationId: true } },
+            { include: { organizationId: true } },
+            { orderBy: { organizationId: 'asc' } },
+            { orderBy: { organizationId: 'desc' } },
+            { distinct: ['organizationId'] },
+            { cursor: { organizationId: 'org_cursor' } },
+            { skip: 10 },
+            { take: 10 },
+            { include: { equipment: { where: { organizationId: 'org_nested' } } } },
+        ];
+
+        for (const args of ignoredContexts) {
+            expect(analyzePrimaryScope({ model: 'WorkOrder', args, context })).toMatchObject({
+                cacheable: false,
+                tenantScope: [],
+                bypassReason: 'tenant-scope-missing',
+            });
+            expect(analyzeReadTags({
+                model: 'WorkOrder',
+                operation: 'findMany',
+                args,
+                context,
+                maxTagsPerQuery: 30,
+            })).toMatchObject({
+                cacheable: false,
+                tenantScope: [],
+                bypassReason: 'tenant-scope-missing',
+            });
+        }
+
+        expect(analyzeReadTags({
+            model: 'WorkOrder',
+            operation: 'findMany',
+            args: {
+                where: { organizationId: 'org_1' },
+                select: { organizationId: true },
+                orderBy: { organizationId: 'desc' },
+            },
+            context,
+            maxTagsPerQuery: 30,
+        })).toMatchObject({
+            cacheable: true,
+            tenantScope: ['organization:org_1'],
+        });
+    });
+
     test('resolves compound and logical primary predicates without relation tenants', () => {
         const result = analyzePrimaryScope({
             model: 'WorkOrder',

@@ -558,9 +558,9 @@ export async function handleWrite(params: {
  */
 export function createCacheTagsExtension<TSchema extends CacheSchemaDescriptor>(
     redisAdapter: RedisAdapter,
-    config: CacheTagsConfig<TSchema> | NormalizedCacheConfig<TSchema>,
+    config: CacheTagsConfig<TSchema>,
 ) {
-    const finalConfig = 'analysis' in config ? config : normalizeConfig(config);
+    const finalConfig = normalizeConfig(config);
 
     return Prisma.defineExtension((client) => {
         const extendedClient = client.$extends({

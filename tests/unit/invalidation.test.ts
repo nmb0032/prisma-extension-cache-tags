@@ -165,6 +165,27 @@ describe('bumpTagVersions', () => {
 });
 
 describe('deferred invalidation context', () => {
+    test('rejects normalized configs at the public boundary', () => {
+        const normalized = normalizeConfig({ schema: cacheSchema, models: cacheModels });
+
+        if (false) {
+            // @ts-expect-error NormalizedCacheConfig is an internal runtime type.
+            withCacheInvalidation(async () => undefined, redis, normalized);
+        }
+    });
+
+    test('validates a public config even when it contains an analysis property', async () => {
+        const invalidConfig = {
+            schema: { formatVersion: 2, models: {} },
+            models: {},
+            analysis: {},
+        } as never;
+
+        await expect(
+            withCacheInvalidation(async () => undefined, redis, invalidConfig),
+        ).rejects.toThrow('Unsupported cache schema format version');
+    });
+
     test('normalizes omitted and partial wrapper configuration', async () => {
         await withCacheInvalidation(
             async () => {
@@ -210,7 +231,11 @@ describe('deferred invalidation context', () => {
                     return 'completed';
                 },
                 redis,
-                wrapperConfig,
+                {
+                    schema: cacheSchema,
+                    models: cacheModels,
+                    logger: wrapperConfig.logger,
+                },
             ),
         ).resolves.toBe('completed');
 

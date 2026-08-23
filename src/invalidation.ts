@@ -93,12 +93,12 @@ export async function publishInvalidation(tags: string[], config: NormalizedCach
     await bumpTagVersions(tags, config, redisAdapter);
 }
 
-export async function withCacheInvalidation<T>(
+export async function withCacheInvalidation<T, TSchema extends CacheSchemaDescriptor>(
     fn: () => Promise<T>,
     redisAdapter: RedisAdapter,
-    config: CacheTagsConfig<CacheSchemaDescriptor> | NormalizedCacheConfig,
+    config: CacheTagsConfig<TSchema>,
 ): Promise<T> {
-    const normalized = 'analysis' in config ? config : normalizeConfig(config);
+    const normalized = normalizeConfig(config);
 
     return runWithInvalidationContext(fn, async (tags) => {
         try {

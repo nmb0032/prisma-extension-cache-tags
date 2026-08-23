@@ -61,6 +61,27 @@ describe('normalizeConfig', () => {
 });
 
 describe('createCacheTagsExtension', () => {
+    test('rejects normalized configs at the public boundary', () => {
+        const normalized = normalizeConfig({ schema: cacheSchema, models: cacheModels });
+
+        if (false) {
+            // @ts-expect-error NormalizedCacheConfig is an internal runtime type.
+            createCacheTagsExtension(redis, normalized);
+        }
+    });
+
+    test('validates a public config even when it contains an analysis property', () => {
+        const invalidConfig = {
+            schema: { formatVersion: 2, models: {} },
+            models: {},
+            analysis: {},
+        } as never;
+
+        expect(() => createCacheTagsExtension(redis, invalidConfig)).toThrow(
+            'Unsupported cache schema format version',
+        );
+    });
+
     test('strips cache args when caching is disabled globally', async () => {
         let operationHandler!: (params: Record<string, unknown>) => Promise<unknown>;
         const base = {
@@ -97,7 +118,12 @@ describe('createCacheTagsExtension', () => {
         const query = vi.fn().mockResolvedValue([{ id: 'fresh' }]);
         const args = { where: { value: () => 'unsupported' }, cache: { ttlSeconds: 60 } };
 
-        createCacheTagsExtension(redis, config)(base as never);
+        createCacheTagsExtension(redis, {
+            schema: cacheSchema,
+            models: cacheModels,
+            logger: config.logger,
+            metrics: config.metrics,
+        })(base as never);
         const result = await operationHandler({ model: 'Widget', operation: 'findMany', args, query });
 
         expect(result).toEqual([{ id: 'fresh' }]);
@@ -131,7 +157,11 @@ describe('createCacheTagsExtension', () => {
         const query = vi.fn().mockResolvedValue([{ id: 'fresh' }]);
         const config = makeConfig({ metrics: { onCacheEvent } });
 
-        createCacheTagsExtension(redis, config)(base as never);
+        createCacheTagsExtension(redis, {
+            schema: cacheSchema,
+            models: cacheModels,
+            metrics: config.metrics,
+        })(base as never);
         const result = await operationHandler({ model: 'Widget', operation: 'findMany', args: { ...args, cache: {} }, query });
 
         expect(result).toEqual([{ id: 'fresh' }]);

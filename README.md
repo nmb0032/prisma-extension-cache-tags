@@ -1,234 +1,418 @@
 # prisma-extension-cache-tags
 
-Redis caching for Prisma with automatic, generational tag invalidation — invalidation is O(tags), independent of cache keyspace size, never a `SCAN`.
+Opt-in Redis read-through caching for Prisma 7 with automatic, generational tag
+invalidation that stays O(tags) and never scans the cache keyspace.
 
-## Install
+[![CI](https://github.com/nmb0032/prisma-extension-cache-tags/actions/workflows/ci.yml/badge.svg)](https://github.com/nmb0032/prisma-extension-cache-tags/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/nmb0032/prisma-extension-cache-tags)](LICENSE)
+
+## Contents
+
+- [prisma-extension-cache-tags](#prisma-extension-cache-tags)
+  - [Contents](#contents)
+  - [Why this package](#why-this-package)
+  - [Requirements and installation](#requirements-and-installation)
+  - [60-second quick start](#60-second-quick-start)
+  - [Recipes](#recipes)
+    - [ioredis](#ioredis)
+    - [Per-query options and bypasses](#per-query-options-and-bypasses)
+    - [Explicit tags](#explicit-tags)
+    - [Dependency tags](#dependency-tags)
+    - [Safe multi-tenant defaults](#safe-multi-tenant-defaults)
+    - [Interactive transactions](#interactive-transactions)
+    - [Optional `withCacheInvalidation` fallback](#optional-withcacheinvalidation-fallback)
+    - [Structured logging and metrics](#structured-logging-and-metrics)
+  - [How it works](#how-it-works)
+  - [Compatibility and operational limits](#compatibility-and-operational-limits)
+  - [Benchmarks](#benchmarks)
+  - [Documentation](#documentation)
+  - [Contributing](#contributing)
+  - [License](#license)
+
+## Why this package
+
+- Opt-in read-through caching for Prisma 7 `findUnique`, `findFirst`, `findMany`,
+  `count`, `aggregate`, and `groupBy` reads.
+- Automatic generational tag invalidation after successful writes.
+- O(tags) invalidation with no `SCAN` and no tag-to-key index.
+- Exact canonical cache identity and sorted tenant-scope verification before
+  every returned hit.
+- Invalidation deferred until a transaction commits; a rollback leaves the
+  previous cache generation valid.
+- Distributed single-flight protection for concurrent cache misses.
+- Built-in node-redis and ioredis adapters, plus a minimal custom
+  `RedisAdapter` interface.
+- Optimized Redis scripts for standalone and Sentinel deployments when
+  available, with a safe command fallback for Redis Cluster.
+
+## Requirements and installation
+
+- Node.js `^20.19 || ^22.12 || >=24.0`
+- Prisma 7 with `@prisma/client` `^7.2.0` and a Prisma driver adapter, such as
+  `@prisma/adapter-pg`
+- A Redis server and exactly one supported Redis client:
+  `redis` `^5.0.0 || ^6.0.0` or `ioredis` `^5.0.0 || ^6.0.0`
+
+Install the package with one Redis client. Choose one command; do not install
+both clients for the same adapter:
 
 ```bash
-npm install prisma-extension-cache-tags
-# plus whichever Redis client you already use
-npm install redis    # or: npm install ioredis
+pnpm add prisma-extension-cache-tags redis
+# or
+pnpm add prisma-extension-cache-tags ioredis
 ```
 
-## Quickstart
+The package does not replace Prisma setup. Your application must already
+generate a Prisma 7 client with a driver adapter.
 
-This example assumes a Prisma 7 `prisma-client` generator output at
-`./generated/prisma`.
+## 60-second quick start
+
+This example uses Prisma 7's `prisma-client` generator, PostgreSQL through
+`@prisma/adapter-pg`, and node-redis. Set `DATABASE_URL` and `REDIS_URL` before
+starting the application.
+
+Generate a client from a schema like this:
+
+```prisma
+// prisma/schema.prisma
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Widget {
+  id       String @id @default(uuid())
+  tenantId String
+  name     String
+}
+```
+
+Prisma 7 reads the datasource URL from `prisma.config.ts`:
 
 ```ts
-import { PrismaPg } from '@prisma/adapter-pg';
-import { createClient } from 'redis';
-import { createCacheTagsExtension } from 'prisma-extension-cache-tags';
-import { createNodeRedisAdapter } from 'prisma-extension-cache-tags/node-redis';
-import { PrismaClient } from './generated/prisma/client';
+// prisma.config.ts
+import path from "node:path";
+import { defineConfig, env } from "prisma/config";
 
-const redis = createClient({ url: process.env.REDIS_URL });
+export default defineConfig({
+  schema: path.join("prisma", "schema.prisma"),
+  datasource: {
+    url: env("DATABASE_URL"),
+  },
+});
+```
+
+Create the extended client:
+
+```ts
+// src/db.ts
+import { PrismaPg } from "@prisma/adapter-pg";
+import { createClient } from "redis";
+import { createCacheTagsExtension } from "prisma-extension-cache-tags";
+import { createNodeRedisAdapter } from "prisma-extension-cache-tags/node-redis";
+import { PrismaClient } from "./generated/prisma/client";
+
+const databaseUrl = process.env.DATABASE_URL;
+const redisUrl = process.env.REDIS_URL;
+
+if (!databaseUrl || !redisUrl) {
+  throw new Error("DATABASE_URL and REDIS_URL are required");
+}
+
+const redis = createClient({ url: redisUrl });
 await redis.connect();
 
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-
-export const prisma = new PrismaClient({ adapter }).$extends(
-    createCacheTagsExtension(createNodeRedisAdapter(redis), {
-        tenantKeys: ['organizationId'],
-    }),
+const prismaAdapter = new PrismaPg({ connectionString: databaseUrl });
+export const prisma = new PrismaClient({ adapter: prismaAdapter }).$extends(
+  createCacheTagsExtension(createNodeRedisAdapter(redis), {
+    tenantKeys: ["tenantId"],
+  }),
 );
 
-// Opt in per query. Tags are inferred automatically.
+// Caching is opt-in per read. Tags are inferred from the Prisma arguments.
 const widgets = await prisma.widget.findMany({
-    where: { organizationId: 'org_123' },
-    cache: { ttlSeconds: 60 },
+  where: { tenantId: "org_123" },
+  cache: { ttlSeconds: 60 },
 });
 
-// A write invalidates every cached read that shares a tag. No extra code.
+// Successful writes invalidate matching generations automatically.
 await prisma.widget.update({
-    where: { id: 'widget_1' },
-    data: { name: 'renamed' },
+  where: { id: "widget_1" },
+  data: { name: "renamed" },
 });
 ```
 
-When `tenantKeys` is configured, an ID-only update or delete uses the returned
-record to identify its tenant when possible. By default, every inferred read and
-write also carries the unscoped `global:model:<Model>` tag. This is deliberately
-model-level invalidation: it keeps ambiguous read/write arguments correct, but a
-write in one tenant can evict cached reads for every tenant.
+Run `pnpm prisma generate` after changing the schema. Adapt the generated
+client path to your application's output directory.
 
-Set `tenantPrecision: true` only when the application guarantees that every
-cached read and every write includes one of the configured `tenantKeys` (for
-example, a Prisma client already scoped per tenant):
+## Recipes
+
+### ioredis
+
+Use the ioredis subpath export instead of the node-redis adapter:
 
 ```ts
-createCacheTagsExtension(createNodeRedisAdapter(redis), {
-    tenantKeys: ['organizationId'],
-    tenantPrecision: true,
+import Redis from "ioredis";
+import { createCacheTagsExtension } from "prisma-extension-cache-tags";
+import { createIoRedisAdapter } from "prisma-extension-cache-tags/ioredis";
+
+const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
+const redisAdapter = createIoRedisAdapter(redis);
+
+const prisma = new PrismaClient({ adapter: prismaAdapter }).$extends(
+  createCacheTagsExtension(redisAdapter, {
+    tenantKeys: ["tenantId"],
+  }),
+);
+```
+
+`ioredis` connects as needed. The `PrismaClient` and `prismaAdapter` in this
+snippet are the same Prisma 7 setup shown above.
+
+### Per-query options and bypasses
+
+Caching is opt-in on supported reads. `ttlSeconds` is clamped to the configured
+maximum; `key` adds a component to the complete canonical identity and cannot
+make different queries alias each other.
+
+```ts
+const widgets = await prisma.widget.findMany({
+  where: { tenantId: "org_123" },
+  cache: {
+    ttlSeconds: 60,
+    key: "widget-dashboard",
+    debug: true,
+  },
+});
+
+const fresh = await prisma.widget.findMany({
+  where: { tenantId: "org_123" },
+  cache: { enabled: false },
 });
 ```
 
-Precision mode omits the global model tag from tenant-resolved reads. Writes
-with a resolved tenant still include it so tenant-less reads are invalidated; a
-write that cannot resolve a tenant falls back to global model tags and logs a
-warning. If the invariant is not guaranteed, keep the safe default.
+Use `cache: { enabled: false }` for a one-off uncached read. Other per-read
+options include `tags`, `inferTags`, `mergeTags`, and `stampede`.
 
-## How invalidation works
+### Explicit tags
 
-On a cached read, the extension infers tenant, model, and entity tags from the Prisma arguments. Configure argument names with `tenantKeys` and `entityKeys`, or add explicit `cache.tags` when a query needs a broader or custom scope. The default model-level fallback is retained whenever it is emitted, even when `maxTagsPerQuery` truncates a read's tag list. In tenant-precision mode, a read whose required tags exceed the limit safely bypasses caching instead of dropping invalidation tags. The limit never truncates write invalidation tags.
-
-Each tag has a Redis version counter, and the current counter values are folded into the cache key. A read therefore selects the current generation without maintaining a list of every key that carries the tag.
-
-A successful write increments the affected counters, so old cache keys become unreachable immediately and expire on their own TTL. Interactive transactions defer those increments until commit; a rollback does not invalidate the previous generation.
-
-Read the [detailed invalidation explanation](docs/how-invalidation-works.md) for key generation and transaction details.
-
-## v2 keys and wire format
-
-The default namespace is `prismaCacheTags:v2`. A read first prepares one
-canonical identity from its model, operation, cleaned Prisma arguments, schema
-version, normalized tags, tenant scope, and optional custom key. The SHA-256
-digest of that exact identity is used in the base query key and the identity is
-retained in the cached envelope. Current tag versions are appended as a stable
-dot-separated generation token.
-
-Values are stored as one flat SuperJSON string:
+Add the same application tag to reads and writes when a broader or custom
+invalidation scope is useful:
 
 ```ts
-{ identity, tenantScope, value }
+const dashboardTags = ["dashboard:org_123"];
+
+await prisma.widget.findMany({
+  where: { tenantId: "org_123" },
+  cache: { ttlSeconds: 60, tags: dashboardTags },
+});
+
+await prisma.widget.update({
+  where: { id: "widget_1" },
+  data: { name: "renamed" },
+  cache: { tags: dashboardTags },
+});
 ```
 
-Every cache hit, including the optimized path, deserializes and verifies both
-identity and sorted tenant scope before returning `value`. A mismatch is
-deleted when possible, reported as a cache bypass, and never returned. v1 keys
-are not read or migrated.
+The public `createCacheTags` helper also provides tenant, model, and entity tag
+formats when you want consistent names across application code.
 
-The built-in node-redis and ioredis adapters use standalone/Sentinel-safe Lua
-primitives by default when their script commands are available. A versioned
-lookup, owner population/release, and multi-tag invalidation each execute
-atomically. Pass `{ optimized: false }` to either adapter factory, or omit the
-optional primitives on a custom adapter, to use the equivalent command
-fallback. Cluster clients must use the fallback because a multi-key script
-cannot span Redis hash slots.
+### Dependency tags
 
-Lua results are treated as untrusted wire data. The extension deserializes and
-verifies every returned envelope against the prepared canonical identity and
-sorted tenant scope before reporting or serving a hit. Script loads use
-`EVALSHA`, with one `NOSCRIPT` reload/retry; failures are logged and surfaced
-through the optional `metrics.onScriptEvent` hook before the safe fallback runs.
+Map a written model to related models whose cached reads should be invalidated:
 
-## Requirements
+```ts
+import type { CacheTagsConfig } from "prisma-extension-cache-tags";
 
-- Prisma `^7.2.0` with a driver adapter
-- Node `^20.19 || ^22.12 || >=24.0`
-- Any Redis server and a compatible client adapter (`redis`, `ioredis`, or your own `RedisAdapter`)
+const cacheConfig: CacheTagsConfig = {
+  tenantKeys: ["tenantId"],
+  dependencyTags: {
+    Widget: ["Part"],
+  },
+};
+```
 
-## Features
+For application-specific scopes, a dependency resolver receives the model,
+operation, tenant IDs, entity IDs, and original arguments and returns tag
+strings.
 
-- Generational O(tags) invalidation, independent of cache keyspace size
-- Automatic tag inference
-- Cross-model `dependencyTags`
-- Transaction-deferred flush
-- Distributed single-flight lock
-- Atomic standalone Redis fast path (with command fallback)
-- Superjson serialization (Date/Decimal/BigInt safe)
+### Safe multi-tenant defaults
 
-## Comparison and limits
+Configure every argument name that can identify a tenant and keep
+`tenantPrecision` at its default `false` unless the stronger invariant is
+enforced:
 
-The design deliberately focuses on predictable Prisma read-through caching and tag-scaled invalidation that is independent of cache keyspace size. These are the important boundaries:
+```ts
+const cacheConfig: CacheTagsConfig = {
+  tenantKeys: ["tenantId", "organizationId"],
+};
+```
 
-| Area | This package provides | Deliberate limit |
-| --- | --- | --- |
-| Invalidation | Generational tag counters; a write performs one `INCR` per affected tag (O(tags)) and never scans cache keys | Orphaned generations remain in Redis until their TTL expires |
-| Revalidation | Read-through cache with distributed single-flight locking | No stale-while-revalidate |
-| Value storage | Superjson envelopes through a normal Redis client | No RedisJSON integration |
-| Runtime | Prisma 7 driver-adapter setup for supported Node releases | Edge-runtime testing is not provided |
-| Operations | Bring your own Redis deployment and client adapter | No hosted option |
+The default emits an unscoped model tag for inferred reads and writes. This is
+the correctness-first behavior: a write in one tenant can evict another
+tenant's cached entry, but it cannot leave that entry stale.
+
+> **Warning:** Set `tenantPrecision: true` only when every cached read and every
+> write is guaranteed to include one of the configured tenant keys. Tenant-
+> resolved reads then omit the unscoped model tag. A write that cannot resolve a
+> tenant falls back to model-wide invalidation and logs a warning; without the
+> invariant, tenant-precise reads are not safe.
+
+### Interactive transactions
+
+Use Prisma's normal `$transaction`; no wrapper is required. Invalidation tags
+from writes are buffered and flushed once after commit. A rollback does not
+advance the previous generation.
+
+```ts
+await prisma.$transaction(async (tx) => {
+  await tx.widget.update({
+    where: { id: "widget_1" },
+    data: { name: "renamed in transaction" },
+  });
+});
+```
+
+The callback and batch forms of `$transaction` are intercepted on the extended
+client.
+
+### Optional `withCacheInvalidation` fallback
+
+Use `withCacheInvalidation` only for a code path that cannot use the extended
+client's intercepted `$transaction` callback. It buffers tags emitted during
+the callback and flushes them when the callback resolves; it does not replace
+Prisma's database transaction semantics.
+
+```ts
+import { withCacheInvalidation } from "prisma-extension-cache-tags";
+
+const redisAdapter = createNodeRedisAdapter(redis);
+const cacheConfig = { tenantKeys: ["tenantId"] };
+
+await withCacheInvalidation(
+  () =>
+    prisma.widget.update({
+      where: { id: "widget_1" },
+      data: { name: "renamed" },
+    }),
+  redisAdapter,
+  cacheConfig,
+);
+```
+
+Use the same cache configuration for the wrapper and the extended client.
+
+### Structured logging and metrics
+
+Logging is a no-op by default. Logger methods receive `(data, message)`;
+metrics receive cache hits, misses, bypasses, and optional optimized-script
+events.
+
+```ts
+import type { CacheTagsConfig } from "prisma-extension-cache-tags";
+
+const cacheConfig: CacheTagsConfig = {
+  logger: {
+    debug(data, message) {
+      console.debug(message, data);
+    },
+    info(data, message) {
+      console.info(message, data);
+    },
+    warn(data, message) {
+      console.warn(message, data);
+    },
+    error(data, message) {
+      console.error(message, data);
+    },
+  },
+  metrics: {
+    onCacheEvent(event) {
+      console.log("cache event", event);
+    },
+    onScriptEvent(event) {
+      console.log("Redis script event", event);
+    },
+  },
+};
+```
+
+`onCacheEvent` reports `{ model, operation, result, path, reason? }`, where
+`result` is `hit`, `miss`, or `bypass`. The `path` identifies optimized,
+fallback, or bypass handling. Replace the `console` calls with your logging
+and metrics backend.
+
+## How it works
+
+Each cached read resolves inferred and explicit tags, then builds one canonical
+identity from the model, operation, cleaned Prisma arguments, schema version,
+normalized tags, tenant scope, and optional custom key. Its SHA-256 digest forms
+the base cache key; current tag-generation counters are appended to select the
+active generation. The stored envelope retains the identity and sorted tenant
+scope, and every candidate hit is verified before its value is returned.
+
+A successful write increments each affected tag counter instead of deleting
+matching keys. Older generations become unreachable immediately and expire
+through their own TTL, so invalidation stays independent of the number of
+cached keys. See [How invalidation works](docs/how-invalidation-works.md) and
+[Configuration](docs/configuration.md) for the full key, tag, and transaction
+details.
+
+## Compatibility and operational limits
+
+| Area            | Support or limit                                                                                                       |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Runtime         | Node.js 20.19+ in the 20.x line, 22.12+ in the 22.x line, or 24+                                                       |
+| Prisma          | `@prisma/client` `^7.2.0` with a driver adapter                                                                        |
+| Redis clients   | `redis` 5.x or 6.x, `ioredis` 5.x or 6.x, or a custom `RedisAdapter`                                                   |
+| Topology        | Built-in adapters use optimized scripts on standalone/Sentinel when available; Redis Cluster uses the command fallback |
+| External writes | Database writes outside the extended Prisma client are not observed and require an explicit invalidation integration   |
+| Old generations | Unreachable keys remain until their configured TTL expires                                                             |
+| Scope           | No stale-while-revalidate, hosted Redis service, or edge-runtime guarantee                                             |
 
 ## Benchmarks
 
-Run the benchmarks after completing the local setup in [CONTRIBUTING.md](CONTRIBUTING.md):
-install dependencies, start PostgreSQL and Redis with `pnpm db:up`, set
-`TEST_DATABASE_URL` and `TEST_REDIS_URL` as needed, and prepare the Prisma fixture
-schema. The invalidation benchmark only needs Redis; the model-backed benchmark
-needs both PostgreSQL and Redis.
+One controlled local stress run reported the following; these are environment-
+specific measurements, not universal package claims:
+
+| Measurement                    |                       Result |
+| ------------------------------ | ---------------------------: |
+| Raw throughput                 |    approximately 21K ops/sec |
+| Warm throughput                |               42,942 ops/sec |
+| Warm speedup                   |                        2.03x |
+| Warm database queries          |                            0 |
+| Warm latency (p50 / p95 / p99) |        0.67 / 1.28 / 1.43 ms |
+| Raw A/B drift                  |                        1.36% |
+| 32-client cold-key contention  | one database query per round |
+
+Reproduce the load and invalidation benchmarks with the setup in
+[CONTRIBUTING.md](CONTRIBUTING.md):
 
 ```bash
-pnpm test:benchmark:invalidation
-pnpm test:benchmark:load
-pnpm test:benchmark:load -- --profile quick
 pnpm test:benchmark:load -- --profile stress
-pnpm test:benchmark:load -- --workload list-heavy
-pnpm test:benchmark:load -- --workload zipfian
-pnpm test:benchmark:load -- --profile stress --workload list-heavy
-pnpm test:benchmark:load -- --preserve
+pnpm test:benchmark:invalidation
 ```
 
-`test:benchmark:invalidation` is a synthetic keyspace-scaling microbenchmark. It
-seeds synthetic cached-query keys and measures whether generational invalidation
-cost changes as the Redis keyspace grows. `test:benchmark:load` first discards an
-untimed raw warm-up, then runs raw A, cold, warm, and raw B samples over one
-finite deterministic plan from the fixture's shared corpus. Cold starts after
-clearing the run namespace; warm repeats without cleanup. Every measured phase
-uses the same clients and concurrency, verifies result-digest equivalence, and
-reports throughput, latency percentiles, cache hits/misses, and database queries.
-The plan includes unique Widget/Part reads, tenant lists, and a Widget
-aggregate. A separate per-query-kind table prevents the aggregate from hiding a
-regression. Event-loop active/idle milliseconds and utilization are reported.
-The report shows symmetric raw A/B drift. When drift is at most 10%, speedups
-use the arithmetic mean of both raw samples; otherwise they render as
-`unstable`.
+The invalidation benchmark calls `FLUSHDB` on its selected Redis database.
+Run it only against a disposable database with no concurrent users. See the
+[benchmark harness notes](tests/load/README.md) for workload and isolation
+details.
 
-The load benchmark also synchronizes 32 independent Prisma clients sharing one Redis connection on one cold key.
-Quick runs use 10 rounds and stress runs use 30, reporting one database-query
-count per round plus winner and loser p50/p95/p99 latency. It then prints the
-existing blended 90% read / 10% write report for invalidation, distributed
-stampede, and post-write freshness validation. The comparison namespace is
-cleared before that mixed-workload warm-up so its cache state and report remain
-isolated from the comparison.
+## Documentation
 
-The load command also runs isolated warm-read, cold-read, write, and multi-tag
-invalidation probes. Redis `INFO commandstats` deltas are explicitly labeled
-process-wide rather than namespace-local, and probes run without benchmark
-workers. Event-loop utilization is included for comparison phases, probes,
-contention, and the mixed correctness phase.
+- [Configuration reference](docs/configuration.md)
+- [How invalidation works](docs/how-invalidation-works.md)
+- [Benchmark harness](tests/load/README.md)
 
-`standard` is intentionally unfavorable to caching because it contains mostly
-unique reads and writes. `list-heavy` uses `take: 100`, deterministic
-512-character Widget and 256-character Part descriptions, and at least 70%
-list/aggregate reads. `zipfian` uses a seeded PRNG, exponent 1.1, repeated hot
-keys across the complete five-kind query-identity set, cold contention, and an
-approximately 80% hottest-20% traffic target (reported with a ±10% tolerance).
+## Contributing
 
-The `quick` profile is the default; `--profile stress` uses a larger dataset,
-more concurrency, and a longer measurement window for deliberate capacity
-investigations. Warm-up requests are sampled and bounded, and each benchmark
-Prisma client is capped at one PostgreSQL connection. Performance numbers are
-informational only, not statistical claims or CI thresholds; correctness
-failures remain fatal.
-
-The invalidation benchmark reports p50 and p99 invalidation latency by keyspace
-and verifies one logical increment per invalidation: optimized Redis `EVALSHA`
-contains a nested `INCR`, while forced fallback mode reports `INCRBY`. The
-blended model-backed report
-continues to include throughput, p50/p95/p99 latency, cache-event hit rate
-(hits divided by cache events, including waiter hits and bypasses), database
-query count, errors, and freshness failures. The preceding comparison has its
-own rows and counters, so its read-only measurements do not alter the mixed
-workload report. A focused Redis `INFO commandstats` probe can isolate warm
-lookup, cold-owner, and multi-tag invalidation command deltas (including nested
-`INCR` versus fallback `INCRBY`); `INFO` counters are process-wide, so reset
-and run each probe without concurrent traffic. A
-network-separated or latency-injected Redis can be selected with
-`TEST_REDIS_URL`; this is external configuration, not an automated dependency.
-Hardware, service versions, topology, and background load affect results, so
-local numbers must not be presented as universal package performance claims.
-Service diagnostics redact URL userinfo and credential-like query values while
-retaining valid endpoint topology; malformed URLs are shown as
-`[redacted service URL]`.
-
-The model-backed benchmark normally removes only the current run's database rows
-and Redis namespace, and never flushes the Redis database. Pass `--preserve` to
-skip that cleanup and inspect the run; the command prints the run ID, tenant IDs,
-and Redis key prefix. The synthetic invalidation benchmark resets its disposable
-Redis database with `FLUSHDB`, so run it only against a disposable database with
-no concurrent users.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local services, verification
+commands, and commit conventions.
 
 ## License
 
-MIT
+[MIT](LICENSE)

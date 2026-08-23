@@ -47,6 +47,52 @@ interface DependencyState {
     visited: WeakSet<object>;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+    const ownKeys = Reflect.ownKeys(value);
+    return ownKeys.length === keys.length && keys.every((key) => ownKeys.includes(key));
+}
+
+function isValidScope(value: unknown): value is CacheScope {
+    return (
+        isRecord(value) &&
+        hasExactKeys(value, ['namespace', 'id']) &&
+        typeof value.namespace === 'string' &&
+        value.namespace.trim() !== '' &&
+        typeof value.id === 'string' &&
+        value.id.trim() !== ''
+    );
+}
+
+function parseCustomDependency(value: unknown): ReadDependency | undefined {
+    if (!isRecord(value)) {
+        return undefined;
+    }
+    if (hasExactKeys(value, ['tag'])) {
+        return typeof value.tag === 'string' && value.tag.trim() !== ''
+            ? { tag: value.tag }
+            : undefined;
+    }
+    if (
+        !hasExactKeys(value, ['model']) &&
+        !hasExactKeys(value, ['model', 'scope'])
+    ) {
+        return undefined;
+    }
+    if (typeof value.model !== 'string' || value.model.trim() === '') {
+        return undefined;
+    }
+    if (!Object.prototype.hasOwnProperty.call(value, 'scope') || value.scope === undefined) {
+        return { model: value.model };
+    }
+    return isValidScope(value.scope)
+        ? { model: value.model, scope: value.scope }
+        : undefined;
+}
+
 function addBypass(state: DependencyState, reason: CacheBypassReason): void {
     state.bypassReason ??= reason;
 }
@@ -103,6 +149,7 @@ function visitRelation(
     relationName: string,
     relationValue: unknown,
     sourceScopes: readonly CacheScope[],
+    allowBoolean: boolean,
     state: DependencyState,
 ): void {
     const source = state.context.models[sourceModel];
@@ -115,6 +162,15 @@ function visitRelation(
     const target = state.context.models[targetModel];
     if (!target) {
         addBypass(state, 'model-scope-unconfigured');
+        return;
+    }
+    if (typeof relationValue === 'boolean') {
+        if (!allowBoolean) {
+            addBypass(state, 'query-shape-unsupported');
+            return;
+        }
+    } else if (!isRecord(relationValue)) {
+        addBypass(state, 'query-shape-unsupported');
         return;
     }
     const scopes = relationScopes(source, targetModel, target, sourceScopes, relationValue, state);
@@ -155,6 +211,7 @@ function visit(
     value: unknown,
     scopes: readonly CacheScope[],
     state: DependencyState,
+    allowRelationBooleans = false,
 ): void {
     if (state.bypassReason === 'model-scope-unconfigured') {
         return;
@@ -185,9 +242,11 @@ function visit(
         const relation = indexed.relations[key];
         if (relation) {
             if (child === false) {
-                continue;
+                if (allowRelationBooleans) {
+                    continue;
+                }
             }
-            visitRelation(model, key, child, scopes, state);
+            visitRelation(model, key, child, scopes, allowRelationBooleans, state);
             continue;
         }
         if (indexed.descriptor.fields[key]?.kind === 'scalar') {
@@ -195,7 +254,7 @@ function visit(
             continue;
         }
         if (SAME_MODEL_WRAPPERS.has(key)) {
-            visit(model, child, scopes, state);
+            visit(model, child, scopes, state, key === 'select' || key === 'include' || key === '_count');
             continue;
         }
         if (key === 'skip' || key === 'take' || key === 'cursor' || key === 'distinct' || key === 'cache') {
@@ -239,32 +298,33 @@ function resolveCustomDependencies(
         return;
     }
     for (const dependency of dependencies) {
-        if (!dependency || typeof dependency !== 'object') {
+        let parsed: ReadDependency | undefined;
+        try {
+            parsed = parseCustomDependency(dependency);
+        } catch {
             addBypass(state, 'query-shape-unsupported');
             continue;
         }
-        if ('tag' in dependency) {
-            if (typeof dependency.tag === 'string' && dependency.tag.trim() !== '') {
-                state.explicitTags.push(dependency.tag);
-            } else {
-                addBypass(state, 'query-shape-unsupported');
-            }
-            continue;
-        }
-        if (!dependency || typeof dependency.model !== 'string') {
+        if (!parsed) {
             addBypass(state, 'query-shape-unsupported');
             continue;
         }
-        const target = state.context.models[dependency.model];
+        if ('tag' in parsed) {
+            state.explicitTags.push(parsed.tag);
+            continue;
+        }
+        const dependencyModel = parsed.model;
+        const dependencyScope = parsed.scope;
+        const target = state.context.models[dependencyModel];
         if (!target) {
             addBypass(state, 'model-scope-unconfigured');
             continue;
         }
         if (target.scope.kind === 'global') {
-            if (dependency.scope) {
+            if (dependencyScope) {
                 addBypass(state, 'cross-namespace-scope-unknown');
             }
-            addDependency(state, dependency.model, []);
+            addDependency(state, dependencyModel, []);
             continue;
         }
         if (target.scope.kind === 'unconfigured') {
@@ -272,17 +332,17 @@ function resolveCustomDependencies(
             continue;
         }
         const targetNamespace = target.scope.namespace;
-        if (dependency.scope && dependency.scope.namespace !== targetNamespace) {
+        if (dependencyScope && dependencyScope.namespace !== targetNamespace) {
             addBypass(state, 'cross-namespace-scope-unknown');
             continue;
         }
-        const dependencyScopes = dependency.scope
-            ? [dependency.scope]
+        const dependencyScopes = dependencyScope
+            ? [dependencyScope]
             : primaryScopes.filter((scope) => scope.namespace === targetNamespace);
         if (dependencyScopes.length === 0) {
             addBypass(state, 'cross-namespace-scope-unknown');
         }
-        addDependency(state, dependency.model, dependencyScopes);
+        addDependency(state, dependencyModel, dependencyScopes);
     }
 }
 

@@ -177,6 +177,59 @@ describe('schema-aware read analysis', () => {
         expect(result.tags).toContain('scope:organization:org_1:model:MaintenancePolicy');
     });
 
+    test('bypasses malformed custom dependency unions instead of treating them as tags', () => {
+        const configured = createAnalysisContext(schema, {
+            ...modelConfigs,
+            WorkOrder: {
+                tenant: { field: 'organizationId', namespace: 'organization' },
+                readDependencies: () => [
+                    { model: 'MaintenancePolicy', tag: 'external:dispatch-board' },
+                    { model: 'MaintenancePolicy', scope: { namespace: 'organization', id: 'org_1', extra: true } },
+                ] as never,
+            },
+        });
+
+        const result = analyzeReadTags({
+            model: 'WorkOrder',
+            operation: 'findMany',
+            args: { where: { organizationId: 'org_1' } },
+            context: configured,
+            maxTagsPerQuery: 30,
+        });
+
+        expect(result).toMatchObject({ cacheable: false, bypassReason: 'query-shape-unsupported' });
+        expect(result.tags).not.toContain('external:dispatch-board');
+        expect(result.dependencies).toEqual(['WorkOrder']);
+    });
+
+    test('bypasses unsupported relation payloads while accepting include booleans', () => {
+        expect(analyzeReadTags({
+            model: 'WorkOrder',
+            operation: 'findMany',
+            args: { where: { organizationId: 'org_1', equipment: true } },
+            context,
+            maxTagsPerQuery: 30,
+        })).toMatchObject({ cacheable: false, bypassReason: 'query-shape-unsupported' });
+
+        const included = analyzeReadTags({
+            model: 'WorkOrder',
+            operation: 'findMany',
+            args: { where: { organizationId: 'org_1' }, include: { equipment: true } },
+            context,
+            maxTagsPerQuery: 30,
+        });
+        expect(included).toMatchObject({ cacheable: true });
+        expect(included.dependencies).toEqual(['Equipment', 'WorkOrder']);
+
+        expect(analyzeReadTags({
+            model: 'WorkOrder',
+            operation: 'findMany',
+            args: { where: { organizationId: 'org_1' }, include: { equipment: null } },
+            context,
+            maxTagsPerQuery: 30,
+        })).toMatchObject({ cacheable: false, bypassReason: 'query-shape-unsupported' });
+    });
+
     test('bypasses an unscoped primary model and missing tenant scope', () => {
         expect(analyzePrimaryScope({ model: 'AuditEvent', args: {}, context })).toMatchObject({
             cacheable: true,

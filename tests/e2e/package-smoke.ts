@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 
 const repoRoot = process.cwd();
@@ -22,11 +22,17 @@ function main(): void {
 
     try {
         console.log('Packing...');
-        run('npm', ['pack', '--loglevel=error'], repoRoot);
-        tarball = readdirSync(repoRoot).find((file) => file.startsWith('prisma-extension-cache-tags-') && file.endsWith('.tgz'));
-        if (!tarball) {
-            throw new Error('npm pack produced no tarball');
+        const packOutput = execFileSync('npm', ['pack', '--json', '--loglevel=error'], {
+            cwd: repoRoot,
+            encoding: 'utf8',
+            env: process.env,
+        });
+        const packResult = JSON.parse(packOutput) as Array<{ filename?: unknown }>;
+        const packedFilename = packResult[0]?.filename;
+        if (typeof packedFilename !== 'string') {
+            throw new Error('npm pack output did not include an artifact filename');
         }
+        tarball = join(repoRoot, packedFilename);
 
         scratch = join(repoRoot, `.cache-tags-e2e-${process.pid}`);
         rmSync(scratch, { recursive: true, force: true });
@@ -34,7 +40,7 @@ function main(): void {
         console.log(`Installing into ${scratch}...`);
 
         writeFileSync(join(scratch, 'package.json'), JSON.stringify({ name: 'e2e-consumer', version: '1.0.0', private: true }, null, 2));
-        run('npm', ['install', join(repoRoot, tarball), '--legacy-peer-deps', '--no-audit', '--no-fund'], scratch);
+        run('npm', ['install', tarball, '--legacy-peer-deps', '--no-audit', '--no-fund'], scratch);
 
         const generatorBinary = join(scratch, 'node_modules', '.bin', 'prisma-cache-tags-generator');
         console.log('Verifying the installed generator binary...');
@@ -125,18 +131,47 @@ model Equipment {
         if (!existsSync(generatedDescriptor)) {
             throw new Error(`Prisma generator did not create ${generatedDescriptor}`);
         }
-        const generatedSource = readFileSync(generatedDescriptor, 'utf8');
-        if (!generatedSource.includes('"equipment"') || !generatedSource.includes('"target": "Equipment"')) {
-            throw new Error('Generated descriptor is missing the WorkOrder equipment → Equipment relation');
-        }
+        writeFileSync(
+            join(scratch, 'consumer.ts'),
+            `import { cacheSchema } from './generated/cache-tags/index.js';
+import type { CacheSchemaDescriptor } from 'prisma-extension-cache-tags';
+
+const typedSchema: CacheSchemaDescriptor = cacheSchema;
+void typedSchema;
+
+if (cacheSchema.models.WorkOrder.fields.equipment.target !== 'Equipment') {
+    throw new Error('Generated descriptor is missing the WorkOrder equipment → Equipment relation');
+}
+`,
+        );
+        writeFileSync(
+            join(scratch, 'tsconfig.json'),
+            JSON.stringify(
+                {
+                    compilerOptions: {
+                        module: 'NodeNext',
+                        moduleResolution: 'NodeNext',
+                        noEmit: true,
+                        strict: true,
+                        skipLibCheck: true,
+                    },
+                    include: ['consumer.ts'],
+                },
+                null,
+                2,
+            ),
+        );
+        console.log('Typechecking and running the packaged consumer...');
+        run(join(repoRoot, 'node_modules', '.bin', 'tsc'), ['--noEmit', '--project', 'tsconfig.json'], scratch);
+        run(join(repoRoot, 'node_modules', '.bin', 'tsx'), ['consumer.ts'], scratch);
 
         console.log('Checking package exports metadata with publint...');
-        run('pnpm', ['exec', 'publint', join(repoRoot, tarball)], repoRoot, true);
+        run('pnpm', ['exec', 'publint', tarball], repoRoot, true);
 
         console.log('Checking type resolution with are-the-types-wrong...');
         run(
             'pnpm',
-            ['exec', 'attw', join(repoRoot, tarball), '--pack', '--ignore-rules', 'cjs-resolves-to-esm'],
+            ['exec', 'attw', tarball, '--pack', '--ignore-rules', 'cjs-resolves-to-esm'],
             repoRoot,
             true,
         );
@@ -145,7 +180,7 @@ model Equipment {
             rmSync(scratch, { recursive: true, force: true });
         }
         if (tarball) {
-            rmSync(join(repoRoot, tarball), { force: true });
+            rmSync(tarball, { force: true });
         }
     }
 

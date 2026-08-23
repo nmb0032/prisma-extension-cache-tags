@@ -72,7 +72,11 @@ beforeEach(async () => {
 describe('query-aware dependency invalidation', () => {
     test('invalidates only the affected tenant relation and direct model reads', async () => {
         await seed();
-        await readAll();
+        const initialReads = await readAll();
+        counter.reset();
+        const cachedReads = await readAll();
+        expect(cachedReads).toEqual(initialReads);
+        expect(counter.total).toBe(0);
         counter.reset();
 
         await prisma.part.update({
@@ -94,12 +98,21 @@ describe('query-aware dependency invalidation', () => {
 
     test('a tenant-unresolved Part write uses global fallback across tenants', async () => {
         await seed();
-        await Promise.all([
+        const initialReads = await Promise.all([
             prisma.widget.findMany(widgetWithPartsT1),
             prisma.widget.findMany(widgetWithPartsT2),
             prisma.part.findMany(partsT1),
             prisma.part.findMany(partsT2),
         ]);
+        counter.reset();
+        const cachedReads = await Promise.all([
+            prisma.widget.findMany(widgetWithPartsT1),
+            prisma.widget.findMany(widgetWithPartsT2),
+            prisma.part.findMany(partsT1),
+            prisma.part.findMany(partsT2),
+        ]);
+        expect(cachedReads).toEqual(initialReads);
+        expect(counter.total).toBe(0);
         counter.reset();
         const globalPartVersionKey = getTagVersionKey(globalModelTag('Part'), config);
         const before = Number((await redisAdapter.getString(globalPartVersionKey)) ?? 0);
@@ -126,7 +139,11 @@ describe('query-aware dependency invalidation', () => {
 
     test('explicit scope invalidation refreshes every read in one tenant only', async () => {
         await seed();
-        await readAll();
+        const initialReads = await readAll();
+        counter.reset();
+        const cachedReads = await readAll();
+        expect(cachedReads).toEqual(initialReads);
+        expect(counter.total).toBe(0);
         counter.reset();
 
         await invalidateScope({ namespace: 'tenant', id: 't1' }, redisAdapter, {

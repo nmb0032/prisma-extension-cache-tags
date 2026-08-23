@@ -1,10 +1,19 @@
 import { canonicalizePrismaValue } from './canonical';
 import type { AnalysisContext, CacheScope, IndexedModel } from './schema';
-import { resolveModelScopes, serializeScope } from './scope-resolution';
+import { resolveDirectModelScopes, resolveModelScopes, serializeScope } from './scope-resolution';
 import { globalEntityTag, globalModelTag, normalizeTags, scopeEntityTag, scopeModelTag } from './tag-format';
 import type { WriteAnalysis } from './types';
 
-const MUTATION_OPERATIONS = new Set(['create', 'update', 'upsert', 'delete', 'createMany', 'updateMany', 'deleteMany']);
+const MUTATION_OPERATIONS = new Set([
+    'create',
+    'update',
+    'upsert',
+    'delete',
+    'createMany',
+    'updateMany',
+    'deleteMany',
+    'connectOrCreate',
+]);
 const NOOP_RELATION_OPERATIONS = new Set(['connect', 'disconnect', 'set']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -12,7 +21,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function scalarString(value: unknown): string | undefined {
-    return typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint'
+    return (typeof value === 'string'
+        || typeof value === 'bigint'
+        || typeof value === 'boolean'
+        || (typeof value === 'number' && Number.isFinite(value)))
         ? String(value)
         : undefined;
 }
@@ -26,19 +38,7 @@ function directScopes(model: string, value: unknown, context: AnalysisContext): 
     if (!indexed || indexed.scope.kind !== 'tenant') {
         return [];
     }
-    const scopes: CacheScope[] = [];
-    for (const record of valuesAsRecords(value)) {
-        const tenantValue = record[indexed.scope.field];
-        if (tenantValue === undefined) {
-            continue;
-        }
-        scopes.push(...resolveModelScopes({
-            model,
-            values: [{ [indexed.scope.field]: tenantValue }],
-            context,
-        }));
-    }
-    return scopes;
+    return resolveDirectModelScopes({ model, values: [value], context });
 }
 
 function valuesAsRecords(value: unknown): Record<string, unknown>[] {
@@ -48,10 +48,17 @@ function valuesAsRecords(value: unknown): Record<string, unknown>[] {
     return isRecord(value) ? [value] : [];
 }
 
-function identityCandidates(record: Record<string, unknown>): Record<string, unknown>[] {
+function identityCandidates(model: IndexedModel, record: Record<string, unknown>): Record<string, unknown>[] {
     const candidates = [record];
-    for (const value of Object.values(record)) {
-        if (isRecord(value)) {
+    for (const [key, value] of Object.entries(record)) {
+        if (
+            isRecord(value)
+            && !model.relations[key]
+            && model.descriptor.uniqueKeys.some((uniqueKey) =>
+                uniqueKey.length > 1
+                && uniqueKey.every((field) => Object.prototype.hasOwnProperty.call(value, field))
+            )
+        ) {
             candidates.push(value);
         }
     }
@@ -65,7 +72,7 @@ function extractIdentity(model: IndexedModel, values: readonly unknown[]): strin
     const identities = new Set<string>();
     for (const value of values) {
         for (const record of valuesAsRecords(value)) {
-            for (const candidate of identityCandidates(record)) {
+            for (const candidate of identityCandidates(model, record)) {
                 if (!model.descriptor.primaryKey.every((field) => Object.prototype.hasOwnProperty.call(candidate, field))) {
                     continue;
                 }
@@ -77,6 +84,9 @@ function extractIdentity(model: IndexedModel, values: readonly unknown[]): strin
                             identities.add(scalar);
                         }
                     } else {
+                        if (!identityValues.every((identityValue) => scalarString(identityValue) !== undefined)) {
+                            continue;
+                        }
                         const identity: Record<string, unknown> = {};
                         model.descriptor.primaryKey.forEach((field, index) => {
                             identity[field] = identityValues[index];
@@ -223,6 +233,7 @@ function processEvidence(
                 const created = collectScopes(modelName, [create], state);
                 const returned = collectScopes(modelName, resultValues, state);
                 const predicate = collectScopes(modelName, [where], state);
+                const createBranchUnknown = model.scope.kind === 'tenant' && created.length === 0;
                 if (returned.length > 0) {
                     newScopes = returned;
                     addScopedIdentities(state, modelName, [result], newScopes);
@@ -234,6 +245,8 @@ function processEvidence(
                     // create.tenant only describes the create branch, never an existing row.
                     newScopes = created;
                     addScopedIdentities(state, modelName, [create], created);
+                }
+                if (createBranchUnknown) {
                     markFallback(state, modelName);
                 }
             }
@@ -242,8 +255,12 @@ function processEvidence(
         case 'createMany':
             newScopes = collectScopes(modelName, [data], state);
             identities = extractIdentity(model, [data, result]);
-            addScopedIdentities(state, modelName, [data, result], newScopes);
-            if (model.scope.kind === 'tenant' && newScopes.length === 0) {
+            addScopedIdentities(state, modelName, [data, result], []);
+            const bulkRecords = valuesAsRecords(data);
+            if (model.scope.kind === 'tenant' && (
+                bulkRecords.length === 0
+                || bulkRecords.some((record) => directScopes(modelName, record, state.context).length === 0)
+            )) {
                 markFallback(state, modelName);
             }
             break;
@@ -304,7 +321,8 @@ function visitNestedRelations(
                         : isRecord(payloadValue)
                             ? payloadValue
                             : {};
-                processEvidence(relation.target, operation, childArgs, nestedResult(result, relationName), state);
+                const evidenceOperation = operation === 'connectOrCreate' ? 'upsert' : operation;
+                processEvidence(relation.target, evidenceOperation, childArgs, nestedResult(result, relationName), state);
                 const childPayloads: unknown[] = [];
                 if (operation === 'create' || operation === 'createMany') {
                     childPayloads.push(childArgs.data);

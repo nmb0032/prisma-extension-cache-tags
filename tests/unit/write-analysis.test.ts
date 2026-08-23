@@ -334,4 +334,110 @@ describe('narrow write publication analysis', () => {
         expect(result.tags).toContain('scope:organization:org_1:entity:Equipment:eq_1');
         expect(result.tags).toContain('scope:organization:org_2:entity:Equipment:eq_2');
     });
+
+    test('does not assign unknown bulk records to a known tenant scope', () => {
+        const result = analyzeWriteTags({
+            model: 'Equipment',
+            operation: 'createMany',
+            args: {
+                data: [
+                    { id: 'known', organizationId: 'org_1' },
+                    { id: 'unknown' },
+                ],
+            },
+            result: { count: 2 },
+            context,
+        });
+
+        expect(result.tags).toEqual([
+            'global:model:Equipment',
+            'scope:organization:org_1:entity:Equipment:known',
+            'scope:organization:org_1:model:Equipment',
+        ]);
+        expect(result.globalFallbackModels).toEqual(['Equipment']);
+    });
+
+    test('keeps an upsert create branch conservative when its tenant is unknown', () => {
+        const result = analyzeWriteTags({
+            model: 'Equipment',
+            operation: 'upsert',
+            args: {
+                where: { id: 'upserted', organizationId: 'org_existing' },
+                create: { id: 'upserted', name: 'new' },
+                update: { name: 'existing' },
+            },
+            result: undefined,
+            context,
+        });
+
+        expect(result.tags).toEqual([
+            'global:model:Equipment',
+            'scope:organization:org_existing:entity:Equipment:upserted',
+            'scope:organization:org_existing:model:Equipment',
+        ]);
+        expect(result.globalFallbackModels).toEqual(['Equipment']);
+    });
+
+    test('resolves logical and compound predicates without using relation tenants', () => {
+        const result = analyzeWriteTags({
+            model: 'WorkOrder',
+            operation: 'update',
+            args: {
+                where: {
+                    AND: [
+                        { OR: [{ organizationId_number: { organizationId: 'org_1', number: 'WO:1' } }] },
+                        { equipment: { organizationId: 'org_relation' } },
+                    ],
+                },
+                data: { number: 'WO:updated' },
+            },
+            result: undefined,
+            context,
+        });
+
+        expect(result.tags).toEqual([
+            'scope:organization:org_1:model:WorkOrder',
+        ]);
+        expect(result.tenantScope).toEqual(['organization:org_1']);
+        expect(result.globalFallbackModels).toEqual([]);
+    });
+
+    test('treats connectOrCreate as a nested mutation with conservative fallback', () => {
+        const result = analyzeWriteTags({
+            model: 'WorkOrder',
+            operation: 'update',
+            args: {
+                where: { organizationId: 'org_1', number: 'WO:1' },
+                data: {
+                    equipment: {
+                        connectOrCreate: {
+                            where: { id: 'equipment' },
+                            create: { id: 'equipment', name: 'new' },
+                        },
+                    },
+                },
+            },
+            result: { organizationId: 'org_1', number: 'WO:1' },
+            context,
+        });
+
+        expect(result.changedModels).toEqual(['Equipment', 'WorkOrder']);
+        expect(result.tags).toContain('global:model:Equipment');
+        expect(result.tags).not.toContain('scope:organization:org_1:model:Equipment');
+        expect(result.globalFallbackModels).toEqual(['Equipment']);
+    });
+
+    test('omits composite entity tags when any identity component is invalid', () => {
+        const result = analyzeWriteTags({
+            model: 'WorkOrder',
+            operation: 'create',
+            args: { data: { organizationId: 'org_1', number: undefined } },
+            result: { organizationId: 'org_1', number: undefined },
+            context,
+        });
+
+        expect(result.tags).toEqual([
+            'scope:organization:org_1:model:WorkOrder',
+        ]);
+    });
 });

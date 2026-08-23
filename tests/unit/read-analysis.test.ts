@@ -14,7 +14,7 @@ const schema = {
                 equipment: { kind: 'relation', target: 'Equipment', isList: true, relationName: 'EquipmentToWorkOrder' },
             },
             primaryKey: ['id'],
-            uniqueKeys: [['id']],
+            uniqueKeys: [['id'], ['organizationId', 'id']],
         },
         Equipment: {
             fields: {
@@ -242,6 +242,26 @@ describe('schema-aware read analysis', () => {
         expect(analyzePrimaryScope({ model: 'Missing', args: {}, context })).toMatchObject({
             cacheable: false,
             bypassReason: 'model-scope-unconfigured',
+        });
+    });
+
+    test('resolves compound and logical primary predicates without relation tenants', () => {
+        const result = analyzePrimaryScope({
+            model: 'WorkOrder',
+            args: {
+                where: {
+                    OR: [
+                        { namedTenantKey: { organizationId: 'org_compound', id: 'wo_1' } },
+                        { equipment: { organizationId: 'org_relation' } },
+                    ],
+                },
+            },
+            context,
+        });
+
+        expect(result).toMatchObject({
+            cacheable: true,
+            tenantScope: ['organization:org_compound'],
         });
     });
 

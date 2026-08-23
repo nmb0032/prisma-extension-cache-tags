@@ -1,14 +1,29 @@
-import type { AnalysisContext, CacheScope } from './schema';
+import type { AnalysisContext, CacheModelDescriptor, CacheScope } from './schema';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function scalarString(value: unknown): string | undefined {
-    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint') {
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'bigint' || typeof value === 'boolean') {
         return String(value);
     }
     return undefined;
+}
+
+function isCompoundScopePredicate(
+    model: CacheModelDescriptor,
+    tenantField: string,
+    value: unknown,
+): value is Record<string, unknown> {
+    if (!isRecord(value)) {
+        return false;
+    }
+    return model.uniqueKeys.some((uniqueKey) =>
+        uniqueKey.length > 1
+        && uniqueKey.includes(tenantField)
+        && uniqueKey.every((field) => Object.prototype.hasOwnProperty.call(value, field))
+    );
 }
 
 function addTenantValues(value: unknown, scope: { namespace: string }, output: CacheScope[]): void {
@@ -91,6 +106,15 @@ function walkScopes(
         const relation = indexed.relations[key];
         if (followRelations && relation) {
             walkScopes(relation.target, child, context, output, visited, true);
+            continue;
+        }
+
+        if (
+            indexed.scope.kind === 'tenant'
+            && !relation
+            && isCompoundScopePredicate(indexed.descriptor, indexed.scope.field, child)
+        ) {
+            walkScopes(model, child, context, output, visited, followRelations);
             continue;
         }
 

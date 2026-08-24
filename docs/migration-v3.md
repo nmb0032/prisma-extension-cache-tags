@@ -42,7 +42,6 @@ const config = {
         Equipment: {
             tenant: { field: 'organizationId', namespace: 'organization' },
         },
-        AuditEvent: { tenant: false },
     },
 };
 ```
@@ -61,9 +60,8 @@ Prisma. For scalar/application-level relations, use a typed resolver:
 const models = {
     WorkOrder: {
         tenant: { field: 'organizationId', namespace: 'organization' },
-        readDependencies: ({ scopes }) => [{ model: 'ExternalEquipment', scope: scopes[0] }],
+        readDependencies: () => [{ tag: 'external-equipment' }],
     },
-    ExternalEquipment: { tenant: false },
 };
 ```
 
@@ -71,6 +69,8 @@ Resolvers return model dependencies with an optional scope or explicit tags.
 They merge with inferred dependencies by default. `mergeTags: false` replaces
 the inferred set; the caller owns correctness and must provide every required
 dependency, tenant root/fallback, and application tag.
+For an external or application dependency represented by an explicit tag,
+publish that same tag on the corresponding writes or application events.
 
 ## Behavioral changes
 

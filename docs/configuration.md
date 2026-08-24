@@ -15,7 +15,6 @@ const config = {
         Equipment: {
             tenant: { field: 'organizationId', namespace: 'organization' },
         },
-        AuditEvent: { tenant: false },
     },
 };
 ```
@@ -65,11 +64,9 @@ const models = {
     WorkOrder: {
         tenant: { field: 'organizationId', namespace: 'organization' },
         readDependencies: ({ model, operation, args, scopes, schema }) => [
-            { model: 'ExternalEquipment', scope: scopes[0] },
-            { tag: `dashboard:${model}:${operation}` },
+            { tag: 'external-equipment' },
         ],
     },
-    ExternalEquipment: { tenant: false },
 };
 ```
 
@@ -77,7 +74,9 @@ The resolver receives `{ model, operation, args, scopes, schema }` and returns
 `{ model, scope }` or `{ tag }`. Results merge with inferred dependencies by
 default. `cache.mergeTags: false` replaces the complete inferred set, so the
 caller owns correctness for every model, scope, root fallback, and explicit
-tag needed by the read.
+tag needed by the read. When an external or application dependency is
+represented by an explicit tag, publish that same tag on the corresponding
+writes or application events.
 
 ## `CacheReadOptions`
 

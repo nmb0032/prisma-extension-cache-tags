@@ -74,7 +74,6 @@ const prisma = new PrismaClient({
             Equipment: {
                 tenant: { field: 'organizationId', namespace: 'organization' },
             },
-            AuditEvent: { tenant: false },
         },
     }),
 );
@@ -101,7 +100,6 @@ await invalidateScope({ namespace: 'organization', id: 'org_1' }, redisAdapter, 
         Equipment: {
             tenant: { field: 'organizationId', namespace: 'organization' },
         },
-        AuditEvent: { tenant: false },
     },
 });
 ```

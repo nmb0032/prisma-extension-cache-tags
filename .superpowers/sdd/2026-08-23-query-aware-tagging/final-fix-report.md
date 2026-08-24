@@ -118,3 +118,37 @@ The first integration invocation without `TEST_DATABASE_URL` failed during Prism
 
 - Integration tests require explicit `TEST_DATABASE_URL` in this checkout because Prisma config resolves it eagerly; service-backed rerun passed.
 - No remaining known correctness or privacy concerns.
+
+## Human-authorized privacy follow-up
+
+### Code
+
+- `src/extension.ts` now logs canonicalization failures with only `{ model, operation, reason: 'canonicalization' }`; input-controlled path and `CanonicalizationError.reason` are excluded.
+- Cache bypass behavior, bounded canonicalization metric events, and non-canonicalization exception classification are unchanged.
+
+### TDD evidence
+
+- RED: `pnpm exec vitest run --project unit tests/unit/extension.test.ts -t "without logging input-controlled details"` failed because the logger received `path: "$.where['password-secret-property']"` and `reason: "toJSON() failed: distinctive-toJSON-secret"`.
+- GREEN: the same regression passed after the surgical logging change. The test uses a throwing `toJSON()`, a distinctive secret, and a sensitive dynamic property name; it verifies logger calls/messages, metric events, and serialized payloads contain neither input-derived path nor value while bounded metadata remains.
+
+### Validation
+
+```text
+pnpm exec vitest run --project unit tests/unit/extension.test.ts tests/unit/canonical.test.ts
+Test Files 2 passed; Tests 52 passed
+
+pnpm run test:unit
+Test Files 33 passed; Tests 291 passed
+
+pnpm run typecheck
+tsc --noEmit (passed)
+
+pnpm run lint
+eslint . (passed)
+
+pnpm run build
+tsup (CJS, ESM, and DTS builds succeeded)
+
+git diff --check
+(passed with no output)
+```

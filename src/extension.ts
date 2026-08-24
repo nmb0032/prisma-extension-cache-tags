@@ -695,7 +695,7 @@ export function createCacheTagsExtension<TSchema extends CacheSchemaDescriptor>(
                             }
 
                             finalConfig.logger.error(
-                                { model, operation, path: error.path, reason: error.reason },
+                                { model, operation, reason: 'canonicalization' },
                                 'Cache canonicalization failed; bypassing cache',
                             );
                             finalConfig.metrics.onCacheEvent({

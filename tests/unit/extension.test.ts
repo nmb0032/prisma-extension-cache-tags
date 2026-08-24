@@ -380,7 +380,7 @@ describe('createCacheTagsExtension', () => {
         expect(query).toHaveBeenCalledWith({ where: { id: 'w1' } });
     });
 
-    test('bypasses only canonicalization errors and reports the exact argument path', async () => {
+    test('bypasses canonicalization errors without logging input-controlled details', async () => {
         let operationHandler!: (params: Record<string, unknown>) => Promise<unknown>;
         const error = vi.fn();
         const onCacheEvent = vi.fn();
@@ -395,7 +395,18 @@ describe('createCacheTagsExtension', () => {
             }),
         };
         const query = vi.fn().mockResolvedValue([{ id: 'fresh' }]);
-        const args = { where: { value: () => 'unsupported' }, cache: { ttlSeconds: 60 } };
+        const secret = 'distinctive-toJSON-secret';
+        const sensitiveProperty = 'password-secret-property';
+        const args = {
+            where: {
+                [sensitiveProperty]: {
+                    toJSON: () => {
+                        throw new Error(secret);
+                    },
+                },
+            },
+            cache: { ttlSeconds: 60 },
+        };
 
         createCacheTagsExtension(redis, {
             schema: cacheSchema,
@@ -417,9 +428,18 @@ describe('createCacheTagsExtension', () => {
             reason: 'canonicalization',
         });
         expect(error).toHaveBeenCalledWith(
-            expect.objectContaining({ model: 'Widget', operation: 'findMany', path: '$.where.value' }),
-            expect.stringContaining('canonicalization'),
+            { model: 'Widget', operation: 'findMany', reason: 'canonicalization' },
+            'Cache canonicalization failed; bypassing cache',
         );
+        const serializedLogs = JSON.stringify(error.mock.calls);
+        const serializedMetrics = JSON.stringify(onCacheEvent.mock.calls);
+        const inputDerivedPath = `$.where['${sensitiveProperty}']`;
+        expect(serializedLogs).not.toContain(secret);
+        expect(serializedLogs).not.toContain(inputDerivedPath);
+        expect(serializedLogs).not.toContain(sensitiveProperty);
+        expect(serializedMetrics).not.toContain(secret);
+        expect(serializedMetrics).not.toContain(inputDerivedPath);
+        expect(serializedMetrics).not.toContain(sensitiveProperty);
     });
 
     test('bypasses cyclic arguments without traversing them during tag resolution', async () => {

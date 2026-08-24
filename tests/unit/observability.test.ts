@@ -21,8 +21,8 @@ describe('observability defaults', () => {
         const warn = vi.fn();
         const logger = { debug: vi.fn(), info: vi.fn(), warn, error: vi.fn() };
 
-        logger.warn({ tag: 'tenant:1' }, 'something happened');
+        logger.warn({ tag: 'dashboard:tenant:1' }, 'something happened');
 
-        expect(warn).toHaveBeenCalledWith({ tag: 'tenant:1' }, 'something happened');
+        expect(warn).toHaveBeenCalledWith({ tag: 'dashboard:tenant:1' }, 'something happened');
     });
 });

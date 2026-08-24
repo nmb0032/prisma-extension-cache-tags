@@ -264,7 +264,7 @@ function visit(
             visit(model, child, scopes, state, key === 'select' || key === 'include' || key === '_count');
             continue;
         }
-        if (key === 'skip' || key === 'take' || key === 'cursor' || key === 'distinct' || key === 'cache') {
+        if (key === 'skip' || key === 'take' || key === 'cursor' || key === 'distinct' || key === 'cache' || key === '_all') {
             continue;
         }
         if (SCALAR_OPERATORS.has(key)) {

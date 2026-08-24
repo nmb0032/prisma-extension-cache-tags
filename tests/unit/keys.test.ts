@@ -9,7 +9,7 @@ const config: NormalizedCacheConfig = {
     enabled: true,
     defaultTtlSeconds: 30,
     maxTtlSeconds: 300,
-    keyPrefix: 'prismaCacheTags:v2',
+    keyPrefix: 'prismaCacheTags:v3',
     cacheNull: true,
     cacheEmpty: true,
     schemaVersion: 1,
@@ -45,16 +45,16 @@ describe('cache keys', () => {
         ]);
     });
 
-    test('creates stable generation tokens and v2 versioned keys', () => {
+    test('creates stable generation tokens and v3 versioned keys', () => {
         expect(createVersionToken([null, '2', '10'])).toBe('0.2.10');
-        expect(buildVersionedCacheKey('prismaCacheTags:v2:qry:Widget:findMany:abc', '0.2.10')).toBe(
-            'prismaCacheTags:v2:qry:Widget:findMany:abc:0.2.10',
+        expect(buildVersionedCacheKey('prismaCacheTags:v3:qry:Widget:findMany:abc', '0.2.10')).toBe(
+            'prismaCacheTags:v3:qry:Widget:findMany:abc:0.2.10',
         );
     });
 
     test('derives lock keys without a second hash', () => {
-        expect(getCacheLockKey('prismaCacheTags:v2:qry:Widget:findMany:abc:0')).toBe(
-            'prismaCacheTags:v2:qry:Widget:findMany:abc:0:lock',
+        expect(getCacheLockKey('prismaCacheTags:v3:qry:Widget:findMany:abc:0')).toBe(
+            'prismaCacheTags:v3:qry:Widget:findMany:abc:0:lock',
         );
     });
 

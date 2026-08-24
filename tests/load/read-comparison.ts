@@ -170,7 +170,7 @@ async function executeReadComparisonWarmup(
         fixture.clients.map(async (client, workerIndex) => {
             let completed = 0;
             for (let index = workerIndex; index < plan.length; index += fixture.clients.length) {
-                await executeReadComparisonOperation(client, plan[index]!, 'warmup');
+                await executeReadComparisonOperation(client, plan[index]!, 'warmup', fixture.readCorpus);
                 completed += 1;
             }
             return completed;
@@ -214,7 +214,16 @@ async function executeReadComparisonPhase(
     const queryKinds = new QueryKindMetrics();
     const workerResults = await Promise.allSettled(
         fixture.clients.map((client, workerIndex) =>
-            runReadComparisonWorker(client, plan, mode, workerIndex, fixture.clients.length, metrics, queryKinds),
+            runReadComparisonWorker(
+                client,
+                plan,
+                mode,
+                workerIndex,
+                fixture.clients.length,
+                metrics,
+                queryKinds,
+                fixture.readCorpus,
+            ),
         ),
     );
     const elapsedMs = Math.max(0.001, Number(process.hrtime.bigint() - startedAt) / 1_000_000);
@@ -314,6 +323,7 @@ async function runReadComparisonWorker(
     workerCount: number,
     metrics: BenchmarkMetrics,
     queryKinds: QueryKindMetrics,
+    readCorpus: BenchmarkReadCorpus,
 ): Promise<Array<{ index: number; result: unknown }>> {
     const results: Array<{ index: number; result: unknown }> = [];
 
@@ -321,7 +331,7 @@ async function runReadComparisonWorker(
         const operation = plan[index]!;
         const startedAt = process.hrtime.bigint();
         try {
-            const result = await executeReadComparisonOperation(client, operation, mode);
+            const result = await executeReadComparisonOperation(client, operation, mode, readCorpus);
             results.push({ index, result });
             const durationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
             metrics.recordOperation('read', durationMs);
@@ -339,6 +349,7 @@ async function executeReadComparisonOperation(
     client: BenchmarkFixture['clients'][number],
     operation: ReadComparisonOperation,
     mode: ReadComparisonMode | 'warmup',
+    readCorpus: BenchmarkReadCorpus,
 ): Promise<unknown> {
     const cache =
         mode === 'warmup' || mode === 'rawA' || mode === 'rawB'
@@ -346,16 +357,26 @@ async function executeReadComparisonOperation(
             : { ttlSeconds: CACHE_TTL_SECONDS };
 
     switch (operation.kind) {
-        case 'widgetUnique':
+        case 'widgetUnique': {
+            const widget = readCorpus.widgets.find(({ id }) => id === operation.widgetId);
+            if (widget === undefined) {
+                throw new Error(`Unknown benchmark widget ${operation.widgetId}`);
+            }
             return client.widget.findUnique({
-                where: { id: operation.widgetId },
+                where: { id: operation.widgetId, tenantId: widget.tenantId },
                 cache,
             });
-        case 'partUnique':
+        }
+        case 'partUnique': {
+            const part = readCorpus.parts.find(({ id }) => id === operation.partId);
+            if (part === undefined) {
+                throw new Error(`Unknown benchmark part ${operation.partId}`);
+            }
             return client.part.findUnique({
-                where: { id: operation.partId },
+                where: { id: operation.partId, tenantId: part.tenantId },
                 cache,
             });
+        }
         case 'widgetList':
             return client.widget.findMany({
                 where: { tenantId: operation.tenantId },

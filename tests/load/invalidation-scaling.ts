@@ -22,7 +22,7 @@ async function seedKeyspace(client: RedisClient, count: number): Promise<void> {
     for (let start = 0; start < count; start += batchSize) {
         const pipeline = client.multi();
         for (let index = start; index < Math.min(start + batchSize, count); index += 1) {
-            pipeline.set(`prismaCacheTags:v2:qry:Widget:findMany:${index}`, '"cached"');
+            pipeline.set(`prismaCacheTags:v3:qry:Widget:findMany:${index}`, '"cached"');
         }
         await pipeline.exec();
     }
@@ -80,7 +80,7 @@ async function main(): Promise<void> {
             const durations: number[] = [];
             for (let index = 0; index < INVALIDATIONS_PER_SIZE; index += 1) {
                 const startedAt = process.hrtime.bigint();
-                await bumpTagVersions([`tenant:t${index}:model:Widget`], config, adapter);
+                await bumpTagVersions([`scope:tenant:t${index}:model:Widget`], config, adapter);
                 durations.push(Number(process.hrtime.bigint() - startedAt) / 1_000_000);
             }
 

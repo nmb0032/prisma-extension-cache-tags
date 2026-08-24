@@ -105,6 +105,23 @@ describe('read-through caching', () => {
         expect(counter.byModel.Widget).toBe(1);
     });
 
+    test('includes BigInt filter arguments and tenant evidence in a cache hit', async () => {
+        await prisma.widget.create({ data: { tenantId: 't1', sequence: 42n, name: 'bigint-filter' } });
+        counter.reset();
+        const args = {
+            where: { tenantId: 't1', sequence: 42n },
+            cache: { ttlSeconds: 60 },
+        };
+
+        const first = await prisma.widget.findMany(args);
+        const second = await prisma.widget.findMany(args);
+
+        expect(second).toEqual(first);
+        expect(first).toHaveLength(1);
+        expect(first[0]?.sequence).toBe(42n);
+        expect(counter.byModel.Widget).toBe(1);
+    });
+
     test('cached result values retain their BigInt types', async () => {
         const query = vi.fn().mockResolvedValue([{ id: 'w1', sequence: 42n }]);
         const config = normalizeConfig({ schema: cacheSchema, models: cacheModels });
@@ -169,9 +186,9 @@ describe('read-through caching', () => {
         expect(counterA.total + counterB.total).toBe(1);
     });
 
-    test('v1 entries are ignored by the v2 namespace', async () => {
+    test('v2 entries are ignored by the v3 namespace', async () => {
         await prisma.widget.create({ data: { tenantId: 't1', name: 'fresh' } });
-        await redis.set('prismaCacheTags:v1:qry:Widget:findMany:legacy', 'legacy-value');
+        await redis.set('prismaCacheTags:v2:qry:Widget:findMany:legacy', 'legacy-value');
         counter.reset();
 
         const result = await prisma.widget.findMany({ where: { tenantId: 't1' }, cache: { ttlSeconds: 60 } });
@@ -415,7 +432,7 @@ describe('read-through caching', () => {
             reason: 'dependency-tag-limit',
             dependencyCount: 1,
         });
-        expect(await redis.keys('prismaCacheTags:v2:qry:*')).toEqual([]);
+        expect(await redis.keys('prismaCacheTags:v3:qry:*')).toEqual([]);
     });
 
     test('dependency tags invalidate across models', async () => {

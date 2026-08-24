@@ -171,13 +171,13 @@ async function warmClient(
     await Promise.all([
         ...widgets.map((widget) =>
             client.widget.findUnique({
-                where: { id: widget.id },
+                where: { id: widget.id, tenantId: widget.tenantId },
                 cache: { ttlSeconds: CACHE_TTL_SECONDS },
             }),
         ),
         ...parts.map((part) =>
             client.part.findUnique({
-                where: { id: part.id },
+                where: { id: part.id, tenantId: part.tenantId },
                 cache: { ttlSeconds: CACHE_TTL_SECONDS },
             }),
         ),
@@ -247,7 +247,7 @@ async function runWorker(
                 });
 
                 const observed = await readbackClient.widget.findUnique({
-                    where: { id: widget.id },
+                    where: { id: widget.id, tenantId: widget.tenantId },
                     cache: { ttlSeconds: CACHE_TTL_SECONDS },
                 });
                 const observedName = observed?.name;
@@ -279,7 +279,7 @@ async function runReadOperation(
         if (zipfianStream === undefined) {
             throw new Error('Zipfian workloads require a deterministic operation stream per worker');
         }
-        await executeReadOperation(client, zipfianStream.next());
+        await executeReadOperation(client, zipfianStream.next(), readCorpus);
         return;
     }
 
@@ -290,7 +290,7 @@ async function runReadOperation(
         case 'widgetUnique': {
             const widget = readCorpus.widgets[selectIndex(random(), readCorpus.widgets.length)]!;
             await client.widget.findUnique({
-                where: { id: widget.id },
+                where: { id: widget.id, tenantId: widget.tenantId },
                 cache: { ttlSeconds: CACHE_TTL_SECONDS },
             });
             return;
@@ -298,7 +298,7 @@ async function runReadOperation(
         case 'partUnique': {
             const part = readCorpus.parts[selectIndex(random(), readCorpus.parts.length)]!;
             await client.part.findUnique({
-                where: { id: part.id },
+                where: { id: part.id, tenantId: part.tenantId },
                 cache: { ttlSeconds: CACHE_TTL_SECONDS },
             });
             return;
@@ -338,20 +338,31 @@ async function runReadOperation(
 async function executeReadOperation(
     client: BenchmarkFixture['clients'][number],
     operation: RealisticWorkloadOperation,
+    readCorpus: BenchmarkReadCorpus,
 ): Promise<void> {
     switch (operation.kind) {
-        case 'widgetUnique':
+        case 'widgetUnique': {
+            const widget = readCorpus.widgets.find(({ id }) => id === operation.widgetId);
+            if (widget === undefined) {
+                throw new Error(`Unknown benchmark widget ${operation.widgetId}`);
+            }
             await client.widget.findUnique({
-                where: { id: operation.widgetId },
+                where: { id: operation.widgetId, tenantId: widget.tenantId },
                 cache: { ttlSeconds: CACHE_TTL_SECONDS },
             });
             return;
-        case 'partUnique':
+        }
+        case 'partUnique': {
+            const part = readCorpus.parts.find(({ id }) => id === operation.partId);
+            if (part === undefined) {
+                throw new Error(`Unknown benchmark part ${operation.partId}`);
+            }
             await client.part.findUnique({
-                where: { id: operation.partId },
+                where: { id: operation.partId, tenantId: part.tenantId },
                 cache: { ttlSeconds: CACHE_TTL_SECONDS },
             });
             return;
+        }
         case 'widgetList':
             await client.widget.findMany({
                 where: { tenantId: operation.tenantId },

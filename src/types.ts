@@ -169,8 +169,8 @@ export interface CacheStampedeOptions {
  * // Disable caching for this query
  * cache: { enabled: false }
  *
- * // Multi-tenant scoping with tags
- *   cache: { ttlSeconds: 60, tags: ['tenant:123', 'tenant:123:model:Widget'] }
+ * // Add a tenant-scoped application tag when needed
+ *   cache: { ttlSeconds: 60, tags: ['dashboard:organization:123'] }
  * ```
  */
 export interface CacheReadOptions {
@@ -182,7 +182,7 @@ export interface CacheReadOptions {
     enabled?: boolean;
     /** Enable debug logging for cache hits/misses */
     debug?: boolean;
-    /** Tags for scoped cache invalidation (e.g., ['tenant:123'] for multi-tenant) */
+    /** Explicit application tags; inferred scope tags are added by default */
     tags?: string[];
     /** Merge explicit tags with analyzed dependencies (default: true). When false, explicit tags replace inferred tags. */
     mergeTags?: boolean;
@@ -195,15 +195,15 @@ export interface CacheReadOptions {
  *
  * @example
  * ```typescript
- * // Invalidate cache with tags (scoped invalidation)
- * cache: { tags: ['tenant:123', 'tenant:123:model:Widget'] }
+ * // Add an application invalidation tag
+ * cache: { tags: ['dashboard:organization:123'] }
  *
  * // Enable debug logging for cache invalidation
- * cache: { tags: ['tenant:123'], debug: true }
+ * cache: { tags: ['dashboard:organization:123'], debug: true }
  * ```
  */
 export interface CacheWriteOptions {
-    /** Tags for scoped cache invalidation (e.g., ['tenant:123'] for multi-tenant) */
+    /** Explicit application publication tags */
     tags?: string[];
     /** Enable debug logging for cache invalidation */
     debug?: boolean;

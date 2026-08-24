@@ -10,6 +10,7 @@ datasource db {
 model Widget {
   id          String  @id @default(uuid())
   tenantId    String
+  sequence    BigInt  @default(0)
   name        String
   description String  @default("")
   parts       Part[]

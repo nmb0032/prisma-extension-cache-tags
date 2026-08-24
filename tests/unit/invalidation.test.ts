@@ -19,7 +19,7 @@ const config: NormalizedCacheConfig = {
     enabled: true,
     defaultTtlSeconds: 30,
     maxTtlSeconds: 300,
-    keyPrefix: 'prismaCacheTags:v2',
+    keyPrefix: 'prismaCacheTags:v3',
     cacheNull: true,
     cacheEmpty: true,
     schemaVersion: 1,
@@ -49,11 +49,11 @@ describe('bumpTagVersions', () => {
             bumpTagVersions: optimizedBumpTagVersions,
         };
 
-        await bumpTagVersions(['tenant:t1', 'tenant:t1', 'tenant:t2'], { ...config }, { ...redis, optimized });
+        await bumpTagVersions(['scope:tenant:t1:root', 'scope:tenant:t1:root', 'scope:tenant:t2:root'], { ...config }, { ...redis, optimized });
 
         expect(optimizedBumpTagVersions).toHaveBeenCalledTimes(1);
         expect(optimizedBumpTagVersions).toHaveBeenCalledWith(
-            [getTagVersionKey('tenant:t1', config), getTagVersionKey('tenant:t2', config)],
+            [getTagVersionKey('scope:tenant:t1:root', config), getTagVersionKey('scope:tenant:t2:root', config)],
             3600,
             expect.objectContaining({ onScriptEvent: expect.any(Function), onScriptFailure: expect.any(Function) }),
         );
@@ -61,8 +61,8 @@ describe('bumpTagVersions', () => {
     });
 
     test('falls back after a partial optimized bump and expires every tag', async () => {
-        const firstKey = getTagVersionKey('tenant:t1', config);
-        const secondKey = getTagVersionKey('tenant:t2', config);
+        const firstKey = getTagVersionKey('scope:tenant:t1:root', config);
+        const secondKey = getTagVersionKey('scope:tenant:t2:root', config);
         redis.store.set(firstKey, '1');
         const warn = vi.fn();
         const fallbackConfig = {
@@ -78,7 +78,7 @@ describe('bumpTagVersions', () => {
             }),
         };
 
-        await bumpTagVersions(['tenant:t1', 'tenant:t2'], fallbackConfig, { ...redis, optimized });
+        await bumpTagVersions(['scope:tenant:t1:root', 'scope:tenant:t2:root'], fallbackConfig, { ...redis, optimized });
 
         expect(redis.store.get(firstKey)).toBe('2');
         expect(redis.store.get(secondKey)).toBe('1');
@@ -103,7 +103,7 @@ describe('bumpTagVersions', () => {
             evalSha: vi.fn().mockResolvedValue(['not-a-number']),
         });
 
-        await bumpTagVersions(['tenant:t1', 'tenant:t2'], malformedConfig, { ...redis, optimized });
+        await bumpTagVersions(['scope:tenant:t1:root', 'scope:tenant:t2:root'], malformedConfig, { ...redis, optimized });
 
         expect(onScriptEvent).toHaveBeenCalledTimes(1);
         expect(onScriptEvent).toHaveBeenCalledWith({
@@ -120,24 +120,24 @@ describe('bumpTagVersions', () => {
     });
 
     test('increments each tag version exactly once', async () => {
-        await bumpTagVersions(['tenant:t1', 'tenant:t1:model:Widget'], config, redis);
+        await bumpTagVersions(['scope:tenant:t1:root', 'scope:tenant:t1:model:Widget'], config, redis);
 
-        expect(redis.store.get(getTagVersionKey('tenant:t1', config))).toBe('1');
-        expect(redis.store.get(getTagVersionKey('tenant:t1:model:Widget', config))).toBe('1');
+        expect(redis.store.get(getTagVersionKey('scope:tenant:t1:root', config))).toBe('1');
+        expect(redis.store.get(getTagVersionKey('scope:tenant:t1:model:Widget', config))).toBe('1');
     });
 
     test('dedupes repeated tags', async () => {
-        await bumpTagVersions(['tenant:t1', 'tenant:t1'], config, redis);
-        expect(redis.store.get(getTagVersionKey('tenant:t1', config))).toBe('1');
+        await bumpTagVersions(['scope:tenant:t1:root', 'scope:tenant:t1:root'], config, redis);
+        expect(redis.store.get(getTagVersionKey('scope:tenant:t1:root', config))).toBe('1');
     });
 
     test('retains tag versions longer than a cache with a TTL above one hour', async () => {
         const longTtlConfig = { ...config, maxTtlSeconds: 7_200 };
         const expire = vi.spyOn(redis, 'expire');
 
-        await bumpTagVersions(['tenant:t1'], longTtlConfig, redis);
+        await bumpTagVersions(['scope:tenant:t1:root'], longTtlConfig, redis);
 
-        expect(expire).toHaveBeenCalledWith(getTagVersionKey('tenant:t1', longTtlConfig), 72_000);
+        expect(expire).toHaveBeenCalledWith(getTagVersionKey('scope:tenant:t1:root', longTtlConfig), 72_000);
         expect(72_000).toBeGreaterThanOrEqual(longTtlConfig.maxTtlSeconds);
     });
 
@@ -148,11 +148,11 @@ describe('bumpTagVersions', () => {
 
     test('invalidation cost is one increment per tag, independent of cached key count', async () => {
         for (let index = 0; index < 500; index += 1) {
-            redis.store.set(`prismaCacheTags:v2:qry:Widget:findMany:key${index}`, '"cached');
+            redis.store.set(`prismaCacheTags:v3:qry:Widget:findMany:key${index}`, '"cached');
         }
         redis.resetCallCounts();
 
-        await bumpTagVersions(['tenant:t1'], config, redis);
+        await bumpTagVersions(['scope:tenant:t1:root'], config, redis);
 
         expect(redis.callCounts.increment).toBe(1);
         expect(redis.callCounts.delete ?? 0).toBe(0);
@@ -245,8 +245,8 @@ describe('deferred invalidation context', () => {
 
         await runWithInvalidationContext(
             async () => {
-                await publishInvalidation(['tenant:t1'], config, redis);
-                await publishInvalidation(['tenant:t1', 'tenant:t2'], config, redis);
+                await publishInvalidation(['scope:tenant:t1:root'], config, redis);
+                await publishInvalidation(['scope:tenant:t1:root', 'scope:tenant:t2:root'], config, redis);
             },
             async (tags) => {
                 flushed.push([...tags].sort());
@@ -254,14 +254,14 @@ describe('deferred invalidation context', () => {
         );
 
         expect(flushed).toHaveLength(1);
-        expect(flushed[0]).toEqual(['tenant:t1', 'tenant:t2']);
+        expect(flushed[0]).toEqual(['scope:tenant:t1:root', 'scope:tenant:t2:root']);
         // Nothing was bumped during the context itself.
         expect(redis.callCounts.increment).toBeUndefined();
     });
 
     test('bumps immediately when no context is active', async () => {
-        await publishInvalidation(['tenant:t1'], config, redis);
-        expect(redis.store.get(getTagVersionKey('tenant:t1', config))).toBe('1');
+        await publishInvalidation(['scope:tenant:t1:root'], config, redis);
+        expect(redis.store.get(getTagVersionKey('scope:tenant:t1:root', config))).toBe('1');
     });
 
     test('does not flush when the callback throws', async () => {
@@ -270,7 +270,7 @@ describe('deferred invalidation context', () => {
         await expect(
             runWithInvalidationContext(
                 async () => {
-                    await publishInvalidation(['tenant:t1'], config, redis);
+                    await publishInvalidation(['scope:tenant:t1:root'], config, redis);
                     throw new Error('rollback');
                 },
                 async (tags) => {
@@ -280,7 +280,7 @@ describe('deferred invalidation context', () => {
         ).rejects.toThrow('rollback');
 
         expect(flushed).toHaveLength(0);
-        expect(redis.store.get(getTagVersionKey('tenant:t1', config))).toBeUndefined();
+        expect(redis.store.get(getTagVersionKey('scope:tenant:t1:root', config))).toBeUndefined();
     });
 
     test('exposes no context outside of a run', () => {

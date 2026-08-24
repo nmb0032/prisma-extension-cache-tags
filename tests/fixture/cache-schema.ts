@@ -7,6 +7,7 @@ export const cacheSchema = {
             fields: {
                 id: { kind: 'scalar', type: 'String', isId: true, isUnique: true },
                 tenantId: { kind: 'scalar', type: 'String', isId: false, isUnique: false },
+                sequence: { kind: 'scalar', type: 'BigInt', isId: false, isUnique: false },
                 name: { kind: 'scalar', type: 'String', isId: false, isUnique: false },
                 description: { kind: 'scalar', type: 'String', isId: false, isUnique: false },
                 parts: {

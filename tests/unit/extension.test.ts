@@ -846,7 +846,7 @@ describe('readThroughCache', () => {
             metrics: { onCacheEvent },
         });
         const cleanedArgs = { where: { tenantId: 'tenant-a' } };
-        const preparedKey = prepareCacheKey('Widget', 'findMany', cleanedArgs, ['tenant:tenant-a'], ['tenant-a'], config);
+        const preparedKey = prepareCacheKey('Widget', 'findMany', cleanedArgs, ['scope:tenant:tenant-a:model:Widget'], ['tenant-a'], config);
         const cacheKey = buildVersionedCacheKey(preparedKey.baseKey, '0');
         await redis.setString(
             cacheKey,
@@ -865,7 +865,7 @@ describe('readThroughCache', () => {
             cleanedArgs,
             preparedRead: {
                 cleanedArgs,
-                normalizedTags: ['tenant:tenant-a'],
+                normalizedTags: ['scope:tenant:tenant-a:model:Widget'],
                 tenantScope: ['tenant-a'],
                 preparedKey,
             },
@@ -904,7 +904,7 @@ describe('readThroughCache', () => {
             logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error },
         });
         const cleanedArgs = { where: { tenantId: 'tenant-a' } };
-        const preparedKey = prepareCacheKey('Widget', 'findMany', cleanedArgs, ['tenant:tenant-a'], ['tenant-a'], config);
+        const preparedKey = prepareCacheKey('Widget', 'findMany', cleanedArgs, ['scope:tenant:tenant-a:model:Widget'], ['tenant-a'], config);
         const cacheKey = buildVersionedCacheKey(preparedKey.baseKey, '0');
         await redis.setString(
             cacheKey,
@@ -925,7 +925,7 @@ describe('readThroughCache', () => {
                 cleanedArgs,
                 preparedRead: {
                     cleanedArgs,
-                    normalizedTags: ['tenant:tenant-a'],
+                    normalizedTags: ['scope:tenant:tenant-a:model:Widget'],
                     tenantScope: ['tenant-a'],
                     preparedKey,
                 },

@@ -11,7 +11,7 @@ const config: NormalizedCacheConfig = {
     enabled: true,
     defaultTtlSeconds: 30,
     maxTtlSeconds: 300,
-    keyPrefix: 'prismaCacheTags:v2',
+    keyPrefix: 'prismaCacheTags:v3',
     cacheNull: true,
     cacheEmpty: true,
     schemaVersion: 1,

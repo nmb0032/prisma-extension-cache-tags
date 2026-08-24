@@ -1,161 +1,120 @@
 # How invalidation works
 
-This package uses generations instead of a reverse index from tags to Redis
-keys. A cache read selects the current generation, while a write advances the
-generation. No cache-key scan is needed.
+Cache entries use generations rather than a tag-to-key index. A read selects
+the current generation for each subscription; a successful write advances only
+the generations it publishes. No Redis key scan is needed.
 
-## Generational cache keys
+## Read subscriptions and write publications
 
-For every read, the generated base cache key is the SHA-256 hash of one
-canonical identity:
+A cached read subscribes to:
+
+- its primary model;
+- every model referenced by `select`, `include`, relation filters, relation
+  ordering, `_count`, or nested relation arguments;
+- the resolved tenant root;
+- the global model fallback for each tenant-scoped dependency.
+
+For example, a tenant-scoped `WorkOrder` read including `Equipment` subscribes
+to:
+
+```text
+scope:organization:org_1:root
+scope:organization:org_1:model:WorkOrder
+global:model:WorkOrder
+scope:organization:org_1:model:Equipment
+global:model:Equipment
+```
+
+After a successful write, publications contain only changed models, proven
+entity identities, and explicit caller tags. A normal tenant-resolved write
+does not publish the tenant root or global model fallback: roots are reserved
+for `invalidateScope`, and global fallbacks are reserved for ambiguous writes.
+This is why a write stays narrow while a read remains safe if an ambiguous
+publication is later required.
+
+Tenant-scoped tags use:
+
+```text
+scope:<namespace>:<tenantId>:root
+scope:<namespace>:<tenantId>:model:<Model>
+scope:<namespace>:<tenantId>:entity:<Model>:<entityIdentity>
+```
+
+Global fallbacks use `global:model:<Model>`. Entity tags supplement model tags;
+they never replace the model publication needed for list membership, aggregates,
+relation predicates, or ordering.
+
+## Tenant evidence and bypasses
+
+The primary tenant is resolved from the configured scalar field at the primary
+argument level, and may be inherited through relations only when namespaces
+match. A different namespace requires independent evidence or a resolver.
+Without that proof, the read bypasses with
+`cross-namespace-scope-unknown` rather than guessing.
+
+Reads also bypass when the model is unconfigured, tenant scope is missing, a
+relation is unknown/unsupported, or the complete correctness-bearing
+subscription list exceeds `maxTagsPerQuery` (`dependency-tag-limit`). Tags are
+never truncated to make an unsafe cache entry. Writes are never skipped: an
+unresolved primary or nested tenant publishes `global:model:<Model>` and logs a
+bounded warning.
+
+## Generational keys and values
+
+The base key hashes one canonical identity:
 
 ```text
 { model, operation, args, schemaVersion, tags, tenantScope, customKey? }
 ```
 
-`args` are the cleaned Prisma arguments with the extension-only `cache`
-property removed. The caller-provided `customKey`, when present, participates
-in the same identity; it never replaces the model, operation, arguments, tags,
-or tenant scope. Object properties are sorted by the canonical encoder, so
-semantically equal Prisma calls share one base key regardless of insertion
-order.
+The extension-only `cache` property is removed before canonicalization. Object
+properties are sorted and Prisma-relevant values such as `Date`, `Decimal`, and
+`BigInt` retain their types. Current tag counters are read in one multi-get (or
+optimized Lua primitive) and appended to the base key as an ordered version
+token.
 
-For a read of `Widget.findMany`, the generated Redis key is shaped like
-`<prefix>:qry:Widget:findMany:<sha256>:<version-token>`. Current tag versions
-come from an `MGET` of `<prefix>:tagver:<tag>` counters on every fallback read.
-Missing versions are represented as zero, and the ordered values are joined
-with dots (for example, `0.2.10`). With no tags, the token is empty. The
-standalone optimized path performs the same ordered version reads, token
-construction, and cache lookup in one Lua primitive, so its key bytes are
-identical to the fallback key.
+The default namespace is `prismaCacheTags:v3`. Earlier-version entries are
+ignored and expire by their own TTL; there is no mixed-version lookup or
+migration. Stored envelopes retain the canonical identity and sorted scope,
+which are verified before returning a candidate hit.
 
-## Tag resolution and granularity
+## Explicit scope invalidation
 
-With the default `tenantPrecision: false`, every inferred read and write emits
-the unscoped `global:model:<Model>` tag. When a tenant is resolved, tenant,
-tenant-model, and tenant-entity tags are added as well; resolved entity ids
-also receive global entity tags. The global model tag is the correctness
-backstop, so a tenant-less read and a tenant-ful write (or the reverse) still
-share a generation. This is model-level invalidation and can evict other
-tenants' entries.
+```ts
+await invalidateScope({ namespace: 'organization', id: 'org_1' }, redisAdapter, config);
+```
 
-`tenantPrecision: true` is an opt-in for applications that guarantee every
-cached read and every write includes one of `tenantKeys`. A tenant-resolved read
-uses tenant tags only. A tenant-resolved write uses tenant tags plus the
-unscoped model tag so tenant-less reads are still invalidated. A write without a
-resolved tenant falls back to unscoped global tags and logs a warning; callers
-must maintain the invariant for tenant-precise reads to remain sound. When tag
-lists are capped, an emitted unscoped model tag is retained before other tags
-are truncated. In tenant-precision mode, reads whose complete tenant,
-dependency, or entity tag set exceeds `maxTagsPerQuery` bypass caching instead
-of dropping a correctness-bearing tag; the bypass is reported with reason
-`tenant-tag-limit`.
+This advances only `scope:organization:org_1:root`, intentionally invalidating
+every tenant read subscribed to that root. It is the explicit tenant-wide
+operation; ordinary writes do not bump the root.
 
-## What a write does
+## Nested writes
 
-After a write succeeds, the extension resolves the same inferred and explicit
-tags and increments each unique tag counter. Invalidation cost is therefore
-independent of how many keys are cached: it is one `INCR` per affected tag, not
-one delete per matching key. The tag-resolution mode described above determines
-which generations the write advances; the invalidation mechanism itself never
-enumerates cache keys. `maxTagsPerQuery` limits only the tags folded into a
-cached read key; writes advance every resolved tag.
-
-There is no tag-to-key index to maintain or garbage-collect. Incrementing a
-counter makes every older generation unreachable immediately. Those orphaned
-keys still occupy memory until their own TTL expires; that is the deliberate
-trade-off that keeps invalidation scan-free and independent of the cached-key
-count. Tag-version keys also receive an expiry of at least the configured
-maximum cache TTL (normally ten times that TTL, with a 3600-second minimum), so
-a version cannot disappear while an entry from that generation is still
-retained.
-
-When the optimized primitive is available, invalidation passes the unique
-version keys to one Lua script. The script performs each `INCR` and matching
-`EXPIRE` atomically, preserving the same O(tags), scan-free behavior. If the
-script fails after a partial increment, the command fallback increments every
-key again and applies the retention TTL; an extra generation is safe because
-it cannot expose stale data.
-
-The version retention TTL is `Math.max(maxTtlSeconds * 10, 3600)`: the tenfold
-margin keeps counters available well beyond the longest cache entry, while the
-one-hour floor avoids premature generation resets for short-lived caches.
-
-## Cache identity and stored values
-
-Each v2 cached value is stored as one flat SuperJSON string containing
-`{ identity, tenantScope, value }`. The identity is the exact canonical string
-hashed for the base key, and `tenantScope` is sorted and deduplicated. Every
-fallback read deserializes this envelope and verifies both fields before
-returning `value`. A mismatch is logged without full query arguments, deleted
-when possible, measured as `result: 'bypass', path: 'fallback'`, and sent to
-Prisma instead. A deletion failure does not change that safe behavior.
-
-The default prefix is `prismaCacheTags:v2`; v1 entries are deliberately
-ignored and are neither read nor migrated. The raw `RedisAdapter` methods
-`getString` and `setString` exchange these serialized strings directly, so the
-extension does not perform an intermediate JSON conversion.
-
-The optimized lookup also atomically derives `<versioned-cache-key>:lock`,
-checks the value twice around `SET NX PX`, and returns the raw string plus
-ownership flag. A matching owner uses a second Lua primitive to verify the
-token, set the envelope TTL, and delete the lock in one operation. Waiters
-check immediately and then poll with bounded `2, 4, 8, ...` millisecond
-backoff, capped by their configured interval and deadline.
+Nested writes are analyzed using generated relation metadata. A nested model
+gets a tenant-scoped publication only when its tenant is explicit in nested
+arguments or in the successful result. Sharing a namespace with the parent is
+not proof by itself. If nested evidence is absent, its global model fallback is
+published, preserving correctness across all subscribed tenants.
 
 ## Transactions
 
-Interactive transactions use the extended client's normal `$transaction`
-method; no extra wrapper is required:
+Writes in callback and batch `$transaction` forms accumulate unique publication
+tags in an invalidation context. Tags are flushed once after commit; rollback
+publishes nothing. Nested publications and global fallbacks follow the same
+deferral rule. `invalidateScope` called within the active context joins the
+pending set.
 
-```ts
-await prisma.$transaction(async (tx) => {
-    await tx.widget.update({
-        where: { id: 'widget_1' },
-        data: { name: 'renamed in transaction' },
-    });
-});
-```
+`withCacheInvalidation` is an optional wrapper for code that cannot use the
+extended client's intercepted transaction callback. It buffers publications
+until its callback resolves but does not replace Prisma's database commit or
+rollback semantics.
 
-The extension intercepts both callback and array forms of `$transaction` and
-places invalidation tags in an `AsyncLocalStorage` context. Writes inside the
-transaction add tags to that context instead of incrementing Redis
-immediately. After the transaction commits, the unique tags are flushed once.
-If the callback or batch rejects and Prisma rolls back, the flush does not run,
-so the previous cache generation remains valid.
+## Complexity and observability
 
-`withCacheInvalidation(fn, redisAdapter, config?)` is the public wrapper for a
-code path that cannot use the extended client's intercepted transaction
-callback. It is an optional fallback, not part of the normal setup. Use the
-same cache configuration for the wrapper and the extended client:
+Invalidation cost is O(published tags), independent of the number of cached
+keys. Old generations become unreachable immediately and expire later, while
+tag-version counters are retained beyond the longest cache TTL.
 
-```ts
-import { PrismaPg } from '@prisma/adapter-pg';
-import { createClient } from 'redis';
-import { createCacheTagsExtension, withCacheInvalidation } from 'prisma-extension-cache-tags';
-import { createNodeRedisAdapter } from 'prisma-extension-cache-tags/node-redis';
-import { PrismaClient } from './generated/prisma/client';
-
-const redis = createClient({ url: process.env.REDIS_URL });
-await redis.connect();
-
-const redisAdapter = createNodeRedisAdapter(redis);
-const config = { tenantKeys: ['tenantId'] };
-const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
-const prisma = new PrismaClient({ adapter }).$extends(createCacheTagsExtension(redisAdapter, config));
-
-await withCacheInvalidation(
-    async () => {
-        await prisma.widget.update({
-            where: { id: 'widget_1' },
-            data: { name: 'renamed' },
-        });
-    },
-    redisAdapter,
-    config,
-);
-```
-
-The wrapper buffers tags published by the extension until its callback
-resolves. It does not replace Prisma's transaction semantics: database commit
-or rollback still comes from the Prisma operation being wrapped.
+Metrics report bounded model, operation, result, path, dependency count, and
+bypass reason. Logs omit complete query arguments, tenant IDs, returned rows,
+and tag strings by default.

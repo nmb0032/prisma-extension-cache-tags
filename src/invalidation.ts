@@ -11,10 +11,6 @@ type InvalidationContext = {
 
 const invalidationStorage = new AsyncLocalStorage<InvalidationContext>();
 
-function errorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-}
-
 export function getActiveInvalidationContext(): InvalidationContext | undefined {
     return invalidationStorage.getStore();
 }
@@ -49,22 +45,18 @@ export async function bumpTagVersions(tags: string[], config: NormalizedCacheCon
             if (versions.length !== uniqueTags.length) {
                 throw new Error('Optimized invalidation returned an unexpected version count');
             }
-            uniqueTags.forEach((_, index) => {
-                const version = versions[index]!;
+            uniqueTags.forEach(() => {
                 config.logger.debug(
-                    { version, ttl: versionTtlSeconds, tagCount: uniqueTags.length },
+                    { path: 'optimized', tagCount: uniqueTags.length },
                     'Bumped cache tag version',
                 );
             });
             return;
-        } catch (error) {
-            const failure = observation.failureDetails();
+        } catch {
             config.logger.warn(
                 {
-                    primitive: 'bumpTagVersions',
-                    retry: failure?.retry ?? false,
-                    error: errorMessage(failure?.error ?? error),
-                    originalError: failure?.error ?? error,
+                    path: 'optimized',
+                    reason: 'redis-script-failure',
                 },
                 'Optimized invalidation failed; using command fallback',
             );
@@ -74,9 +66,9 @@ export async function bumpTagVersions(tags: string[], config: NormalizedCacheCon
     await Promise.all(
         uniqueTags.map(async (tag) => {
             const key = getTagVersionKey(tag, config);
-            const version = await redisAdapter.increment(key, 1);
+            await redisAdapter.increment(key, 1);
             await redisAdapter.expire(key, versionTtlSeconds);
-            config.logger.debug({ version, ttl: versionTtlSeconds, tagCount: uniqueTags.length }, 'Bumped cache tag version');
+            config.logger.debug({ path: 'fallback', tagCount: uniqueTags.length }, 'Bumped cache tag version');
         }),
     );
 }
@@ -104,7 +96,10 @@ export async function withCacheInvalidation<T, TSchema extends CacheSchemaDescri
         try {
             await bumpTagVersions(tags, normalized, redisAdapter);
         } catch (error) {
-            normalized.logger.error({ tagCount: tags.length, error: (error as Error).message }, 'Deferred cache invalidation failed');
+            normalized.logger.error(
+                { path: 'deferred', reason: 'cache-invalidation-failed', tagCount: tags.length },
+                'Deferred cache invalidation failed',
+            );
         }
     });
 }

@@ -117,4 +117,113 @@ describe('createAnalysisContext', () => {
             }),
         ).toThrow('WorkOrder tenant namespace must not be empty');
     });
+
+    test.each([
+        ['empty model name', { models: { '': schema.models.WorkOrder } }, 'model name must not be empty'],
+        [
+            'empty field name',
+            {
+                models: {
+                    ...schema.models,
+                    WorkOrder: { ...schema.models.WorkOrder, fields: { ...schema.models.WorkOrder.fields, '': schema.models.WorkOrder.fields.id } },
+                },
+            },
+            'WorkOrder field name must not be empty',
+        ],
+        [
+            'empty scalar type',
+            {
+                models: {
+                    ...schema.models,
+                    WorkOrder: {
+                        ...schema.models.WorkOrder,
+                        fields: { ...schema.models.WorkOrder.fields, id: { ...schema.models.WorkOrder.fields.id, type: ' ' } },
+                    },
+                },
+            },
+            'WorkOrder scalar field "id" type must not be empty',
+        ],
+        [
+            'empty relation target',
+            {
+                models: {
+                    ...schema.models,
+                    WorkOrder: {
+                        ...schema.models.WorkOrder,
+                        fields: { ...schema.models.WorkOrder.fields, equipment: { ...schema.models.WorkOrder.fields.equipment, target: ' ' } },
+                    },
+                },
+            },
+            'WorkOrder relation "equipment" target must not be empty',
+        ],
+        [
+            'empty relation name',
+            {
+                models: {
+                    ...schema.models,
+                    WorkOrder: {
+                        ...schema.models.WorkOrder,
+                        fields: { ...schema.models.WorkOrder.fields, equipment: { ...schema.models.WorkOrder.fields.equipment, relationName: '' } },
+                    },
+                },
+            },
+            'WorkOrder relation "equipment" relationName must not be empty',
+        ],
+    ])('rejects %s', (_description, override, message) => {
+        expect(() => createAnalysisContext({ ...schema, ...override } as never, {})).toThrow(message);
+    });
+
+    test.each([
+        ['an empty primary key', { primaryKey: [] }, 'primary key must contain at least one field'],
+        ['an empty primary key component', { primaryKey: [''] }, 'primary key field name must not be empty'],
+        ['a missing primary key field', { primaryKey: ['missing'] }, 'primary key field "missing" does not exist'],
+        ['a relation in the primary key', { primaryKey: ['equipment'] }, 'primary key field "equipment" must be scalar'],
+        ['a duplicate primary key component', { primaryKey: ['id', 'id'] }, 'primary key contains duplicate field "id"'],
+    ])('rejects %s', (_description, keyOverride, message) => {
+        const model = { ...schema.models.WorkOrder, ...keyOverride };
+        expect(() =>
+            createAnalysisContext({ ...schema, models: { ...schema.models, WorkOrder: model } } as never, {}),
+        ).toThrow(message);
+    });
+
+    test.each([
+        ['an empty unique key', { uniqueKeys: [[]] }, 'unique key at index 0 must contain at least one field'],
+        ['an empty unique key component', { uniqueKeys: [['']] }, 'unique key at index 0 field name must not be empty'],
+        ['a missing unique key field', { uniqueKeys: [['missing']] }, 'unique key at index 0 field "missing" does not exist'],
+        ['a relation in a unique key', { uniqueKeys: [['equipment']] }, 'unique key at index 0 field "equipment" must be scalar'],
+        ['a duplicate unique key component', { uniqueKeys: [['id', 'id']] }, 'unique key at index 0 contains duplicate field "id"'],
+    ])('rejects %s', (_description, keyOverride, message) => {
+        const model = { ...schema.models.WorkOrder, ...keyOverride };
+        expect(() =>
+            createAnalysisContext({ ...schema, models: { ...schema.models, WorkOrder: model } } as never, {}),
+        ).toThrow(message);
+    });
+
+    test.each([
+        [
+            'an empty compound key name',
+            { compoundUniqueKeys: [{ name: ' ', fields: ['organizationId', 'id'] }] },
+            'compound unique key name must not be empty',
+        ],
+        [
+            'a compound key with too few fields',
+            { compoundUniqueKeys: [{ name: 'compound', fields: ['id'] }] },
+            'compound unique key "compound" must contain at least two fields',
+        ],
+        [
+            'a compound key with an unknown field',
+            { compoundUniqueKeys: [{ name: 'compound', fields: ['organizationId', 'missing'] }] },
+            'compound unique key "compound" field "missing" does not exist',
+        ],
+        [
+            'a compound key with duplicate fields',
+            { compoundUniqueKeys: [{ name: 'compound', fields: ['id', 'id'] }] },
+            'compound unique key "compound" contains duplicate field "id"',
+        ],
+    ])('rejects %s', (_description, keyOverride, message) => {
+        const model = { ...schema.models.WorkOrder, ...keyOverride };
+        expect(() =>
+            createAnalysisContext({ ...schema, models: { ...schema.models, WorkOrder: model } } as never, {}),
+        ).toThrow(message);
+    });
 });

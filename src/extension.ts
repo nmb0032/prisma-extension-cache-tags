@@ -101,6 +101,10 @@ export function prepareRead(
             ? cacheOptions.tags ?? []
             : [...inferredTags, ...(cacheOptions.tags ?? [])],
     );
+    const cacheable = analysis.cacheable && tags.length <= config.maxTagsPerQuery;
+    const bypassReason = analysis.cacheable && !cacheable
+        ? 'dependency-tag-limit'
+        : analysis.bypassReason;
     const preparedKey = prepareCacheKey(
         model,
         operation,
@@ -116,8 +120,8 @@ export function prepareRead(
         normalizedTags: tags,
         tenantScope: preparedKey.tenantScope,
         preparedKey,
-        cacheable: analysis.cacheable,
-        bypassReason: analysis.bypassReason,
+        cacheable,
+        ...(bypassReason ? { bypassReason } : {}),
         dependencyCount: analysis.dependencies.length,
     };
 }
@@ -143,7 +147,7 @@ async function validateCachedPayload(
 
         onBypass('invalid-envelope');
         config.logger.warn(
-            { model, operation, cacheKey, reason: 'invalid-envelope' },
+            { model, operation, path, reason: 'invalid-envelope' },
             'Invalid cache envelope; bypassing cached value',
         );
         try {
@@ -153,8 +157,8 @@ async function validateCachedPayload(
                 {
                     model,
                     operation,
-                    cacheKey,
-                    error: deleteError instanceof Error ? deleteError.message : String(deleteError),
+                    path,
+                    reason: 'invalid-envelope-delete-failed',
                 },
                 'Invalid cache envelope deletion failed',
             );
@@ -171,15 +175,12 @@ async function validateCachedPayload(
 
     if (!matchesCacheIdentity(cached, prepared.preparedKey)) {
         onBypass('identity-mismatch');
-        const observedTenantScope =
-            cached && typeof cached === 'object' && Array.isArray(cached.tenantScope) ? cached.tenantScope : [];
         config.logger.warn(
             {
                 model,
                 operation,
-                cacheKey,
-                expectedTenantScope: prepared.tenantScope,
-                observedTenantScope,
+                path,
+                reason: 'identity-mismatch',
             },
             'Cache identity mismatch; bypassing cached value',
         );
@@ -190,8 +191,8 @@ async function validateCachedPayload(
                 {
                     model,
                     operation,
-                    cacheKey,
-                    error: error instanceof Error ? error.message : String(error),
+                    path,
+                    reason: 'identity-mismatch-delete-failed',
                 },
                 'Cache identity mismatch deletion failed',
             );
@@ -241,20 +242,11 @@ interface ReadThroughParams {
 
 type PayloadBypassReason = 'identity-mismatch' | 'invalid-envelope';
 
-function errorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-}
-
 function logScriptFailure(
     config: NormalizedCacheConfig,
     primitive: 'lookupVersioned' | 'populateAndRelease' | 'bumpTagVersions',
-    error: unknown,
-    retry = false,
 ): void {
-    config.logger.warn(
-        { primitive, retry, error: errorMessage(error), originalError: error },
-        'Redis cache script failed',
-    );
+    config.logger.warn({ path: primitive, reason: 'redis-script-failure' }, 'Redis cache script failed');
 }
 
 async function readThroughFallback(params: ReadThroughParams, preparedRead: PreparedRead, ttlSeconds: number): Promise<unknown> {
@@ -266,7 +258,10 @@ async function readThroughFallback(params: ReadThroughParams, preparedRead: Prep
         const versions = await redisAdapter.mgetString(preparedRead.preparedKey.tagVersionKeys);
         cacheKey = buildVersionedCacheKey(preparedRead.preparedKey.baseKey, createVersionToken(versions));
     } catch (error) {
-        config.logger.warn({ model, operation, error: errorMessage(error) }, 'Cache read failed; falling back to Prisma query');
+        config.logger.warn(
+            { model, operation, path: 'fallback', reason: 'cache-read-failed' },
+            'Cache read failed; falling back to Prisma query',
+        );
         config.metrics.onCacheEvent({ model, operation, result: 'miss', path: 'fallback' });
         return query(cleanedArgs);
     }
@@ -280,18 +275,39 @@ async function readThroughFallback(params: ReadThroughParams, preparedRead: Prep
         const cachedValue = await getCachedValue();
         if (cachedValue !== undefined) {
             if (cacheOptions.debug) {
-                config.logger.debug({ model, operation, cacheKey, tags: preparedRead.normalizedTags }, 'Cache hit');
+                config.logger.debug(
+                    {
+                        model,
+                        operation,
+                        path: 'fallback',
+                        tagCount: preparedRead.normalizedTags.length,
+                        ...(preparedRead.dependencyCount === undefined ? {} : { dependencyCount: preparedRead.dependencyCount }),
+                    },
+                    'Cache hit',
+                );
             }
             config.metrics.onCacheEvent({ model, operation, result: 'hit', path: 'fallback' });
             return cachedValue.value;
         }
     } catch (error) {
-        config.logger.warn({ model, operation, cacheKey, error: errorMessage(error) }, 'Cache read failed; falling back to Prisma query');
+        config.logger.warn(
+            { model, operation, path: 'fallback', reason: 'cache-read-failed' },
+            'Cache read failed; falling back to Prisma query',
+        );
     }
 
     if (!bypassReason) {
         if (cacheOptions.debug) {
-            config.logger.debug({ model, operation, cacheKey, tags: preparedRead.normalizedTags }, 'Cache miss');
+            config.logger.debug(
+                {
+                    model,
+                    operation,
+                    path: 'fallback',
+                    tagCount: preparedRead.normalizedTags.length,
+                    ...(preparedRead.dependencyCount === undefined ? {} : { dependencyCount: preparedRead.dependencyCount }),
+                },
+                'Cache miss',
+            );
         }
         config.metrics.onCacheEvent({ model, operation, result: 'miss', path: 'fallback' });
     }
@@ -329,7 +345,7 @@ async function readThroughFallback(params: ReadThroughParams, preparedRead: Prep
                 }
             } catch (error) {
                 config.logger.warn(
-                    { model, operation, cacheKey, error: errorMessage(error) },
+                    { model, operation, path: 'fallback', reason: 'cache-lock-failed' },
                     'Cache lock handling failed; falling back to Prisma query',
                 );
             }
@@ -350,13 +366,19 @@ async function readThroughFallback(params: ReadThroughParams, preparedRead: Prep
                 );
                 if (cacheOptions.debug) {
                     config.logger.debug(
-                        { model, operation, cacheKey, ttlSeconds, tags: preparedRead.normalizedTags },
+                        {
+                            model,
+                            operation,
+                            path: 'fallback',
+                            tagCount: preparedRead.normalizedTags.length,
+                            ...(preparedRead.dependencyCount === undefined ? {} : { dependencyCount: preparedRead.dependencyCount }),
+                        },
                         'Cached query result',
                     );
                 }
             } catch (error) {
                 config.logger.warn(
-                    { model, operation, cacheKey, error: errorMessage(error) },
+                    { model, operation, path: 'fallback', reason: 'cache-write-failed' },
                     'Cache write failed; continuing without cache',
                 );
             }
@@ -389,9 +411,8 @@ async function readThroughOptimized(params: ReadThroughParams, preparedRead: Pre
             },
             lookupObservation.callbacks,
         );
-    } catch (error) {
-        const failure = lookupObservation.failureDetails();
-        logScriptFailure(config, 'lookupVersioned', failure?.error ?? error, failure?.retry ?? false);
+    } catch {
+        logScriptFailure(config, 'lookupVersioned');
         return readThroughFallback(params, preparedRead, ttlSeconds);
     }
 
@@ -426,7 +447,13 @@ async function readThroughOptimized(params: ReadThroughParams, preparedRead: Pre
         if (cachedValue !== undefined) {
             if (cacheOptions.debug) {
                 config.logger.debug(
-                    { model, operation, cacheKey: lookup.cacheKey, tags: preparedRead.normalizedTags },
+                    {
+                        model,
+                        operation,
+                        path: 'optimized',
+                        tagCount: preparedRead.normalizedTags.length,
+                        ...(preparedRead.dependencyCount === undefined ? {} : { dependencyCount: preparedRead.dependencyCount }),
+                    },
                     'Cache hit',
                 );
             }
@@ -439,7 +466,13 @@ async function readThroughOptimized(params: ReadThroughParams, preparedRead: Pre
     if (!bypassReason) {
         if (cacheOptions.debug) {
             config.logger.debug(
-                { model, operation, cacheKey: lookup.cacheKey, tags: preparedRead.normalizedTags },
+                {
+                    model,
+                    operation,
+                    path: 'optimized',
+                    tagCount: preparedRead.normalizedTags.length,
+                    ...(preparedRead.dependencyCount === undefined ? {} : { dependencyCount: preparedRead.dependencyCount }),
+                },
                 'Cache miss',
             );
         }
@@ -459,7 +492,7 @@ async function readThroughOptimized(params: ReadThroughParams, preparedRead: Pre
             );
         } catch (error) {
             config.logger.warn(
-                { model, operation, cacheKey: lookup.cacheKey, error: errorMessage(error) },
+                { model, operation, path: 'optimized', reason: 'cache-lock-wait-failed' },
                 'Cache waiter read failed; falling back to Prisma query',
             );
         }
@@ -491,13 +524,18 @@ async function readThroughOptimized(params: ReadThroughParams, preparedRead: Pre
                 );
                 if (populated && cacheOptions.debug) {
                     config.logger.debug(
-                        { model, operation, cacheKey: lookup.cacheKey, ttlSeconds, tags: preparedRead.normalizedTags },
+                        {
+                            model,
+                            operation,
+                            path: 'optimized',
+                            tagCount: preparedRead.normalizedTags.length,
+                            ...(preparedRead.dependencyCount === undefined ? {} : { dependencyCount: preparedRead.dependencyCount }),
+                        },
                         'Cached query result',
                     );
                 }
-            } catch (error) {
-                const failure = populateObservation.failureDetails();
-                logScriptFailure(config, 'populateAndRelease', failure?.error ?? error, failure?.retry ?? false);
+            } catch {
+                logScriptFailure(config, 'populateAndRelease');
             }
         }
         return result;
@@ -515,7 +553,17 @@ export async function readThroughCache(params: ReadThroughParams): Promise<unkno
 
     if (preparedRead.cacheable === false) {
         const reason = preparedRead.bypassReason ?? 'query-shape-unsupported';
-        config.logger.warn({ model, operation, reason }, 'Cache read bypassed safely');
+        config.logger.warn(
+            {
+                model,
+                operation,
+                path: 'bypass',
+                reason,
+                tagCount: preparedRead.normalizedTags.length,
+                ...(preparedRead.dependencyCount === undefined ? {} : { dependencyCount: preparedRead.dependencyCount }),
+            },
+            'Cache read bypassed safely',
+        );
         config.metrics.onCacheEvent({
             model,
             operation,
@@ -577,7 +625,7 @@ export async function handleWrite(params: {
         }
     } catch (error) {
         config.logger.error(
-            { model, operation, error: (error as Error).message },
+            { model, operation, path: 'write', reason: 'cache-invalidation-failed' },
             'Cache invalidation failed after write',
         );
     }
@@ -677,7 +725,7 @@ export function createCacheTagsExtension<TSchema extends CacheSchemaDescriptor>(
                     await bumpTagVersions(tags, finalConfig, redisAdapter);
                 } catch (error) {
                     finalConfig.logger.error(
-                        { tagCount: tags.length, error: (error as Error).message },
+                        { path: 'transaction', reason: 'cache-invalidation-failed', tagCount: tags.length },
                         'Cache invalidation failed after transaction commit',
                     );
                 }

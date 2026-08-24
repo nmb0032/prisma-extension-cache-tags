@@ -79,6 +79,9 @@ function validateSchema(schema: CacheSchemaDescriptor): void {
     }
 
     for (const [modelName, descriptor] of Object.entries(schema.models)) {
+        if (modelName.trim() === '') {
+            throw new Error('Cache schema model name must not be empty');
+        }
         if (!isRecord(descriptor) || !isRecord(descriptor.fields)) {
             throw new Error(`Cache model "${modelName}" has an invalid descriptor`);
         }
@@ -100,7 +103,6 @@ function validateSchema(schema: CacheSchemaDescriptor): void {
                         isRecord(key)
                         && typeof key.name === 'string'
                         && Array.isArray(key.fields)
-                        && key.fields.length > 1
                         && key.fields.every((fieldName) => typeof fieldName === 'string'),
                 ))
         ) {
@@ -115,6 +117,9 @@ function validateSchema(schema: CacheSchemaDescriptor): void {
         }
 
         for (const [fieldName, field] of Object.entries(descriptor.fields)) {
+            if (fieldName.trim() === '') {
+                throw new Error(`${modelName} field name must not be empty`);
+            }
             if (!isRecord(field)) {
                 throw new Error(`${modelName} field "${fieldName}" has an invalid descriptor`);
             }
@@ -133,6 +138,9 @@ function validateSchema(schema: CacheSchemaDescriptor): void {
                 ) {
                     throw new Error(`${modelName} field "${fieldName}" has an invalid scalar descriptor`);
                 }
+                if (field.type.trim() === '') {
+                    throw new Error(`${modelName} scalar field "${fieldName}" type must not be empty`);
+                }
             } else if (field.kind === 'relation') {
                 if (
                     typeof field.target !== 'string' ||
@@ -141,9 +149,61 @@ function validateSchema(schema: CacheSchemaDescriptor): void {
                 ) {
                     throw new Error(`${modelName} relation "${fieldName}" has an invalid descriptor`);
                 }
+                if (field.target.trim() === '') {
+                    throw new Error(`${modelName} relation "${fieldName}" target must not be empty`);
+                }
+                if (field.relationName.trim() === '') {
+                    throw new Error(`${modelName} relation "${fieldName}" relationName must not be empty`);
+                }
             } else {
                 throw new Error(`${modelName} field "${fieldName}" has an invalid descriptor`);
             }
+        }
+
+        const validateKey = (key: unknown, label: string, index?: number): void => {
+            const keyLabel = index === undefined ? label : `${label} at index ${index}`;
+            if (!Array.isArray(key) || key.length === 0) {
+                throw new Error(`${modelName} ${keyLabel} must contain at least one field`);
+            }
+            const seen = new Set<string>();
+            for (const fieldName of key) {
+                if (typeof fieldName !== 'string' || fieldName.trim() === '') {
+                    throw new Error(`${modelName} ${keyLabel} field name must not be empty`);
+                }
+                if (seen.has(fieldName)) {
+                    throw new Error(`${modelName} ${keyLabel} contains duplicate field "${fieldName}"`);
+                }
+                seen.add(fieldName);
+                const field = descriptor.fields[fieldName];
+                if (!field) {
+                    throw new Error(`${modelName} ${keyLabel} field "${fieldName}" does not exist`);
+                }
+                if (field.kind !== 'scalar') {
+                    throw new Error(`${modelName} ${keyLabel} field "${fieldName}" must be scalar`);
+                }
+            }
+        };
+
+        validateKey(descriptor.primaryKey, 'primary key');
+        descriptor.uniqueKeys.forEach((key, index) => validateKey(key, 'unique key', index));
+
+        if (descriptor.compoundUniqueKeys) {
+            const names = new Set<string>();
+            descriptor.compoundUniqueKeys.forEach((key) => {
+                if (key.name.trim() === '') {
+                    throw new Error(`${modelName} compound unique key name must not be empty`);
+                }
+                if (names.has(key.name)) {
+                    throw new Error(`${modelName} compound unique key "${key.name}" is duplicated`);
+                }
+                names.add(key.name);
+                if (key.fields.length < 2) {
+                    throw new Error(
+                        `${modelName} compound unique key "${key.name}" must contain at least two fields`,
+                    );
+                }
+                validateKey(key.fields, `compound unique key "${key.name}"`);
+            });
         }
     }
 

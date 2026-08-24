@@ -85,8 +85,8 @@ describe('bumpTagVersions', () => {
         expect(redis.callCounts.increment).toBe(2);
         expect(redis.callCounts.expire).toBe(2);
         expect(warn).toHaveBeenCalledWith(
-            expect.objectContaining({ primitive: 'bumpTagVersions', retry: false, error: 'script connection lost' }),
-            expect.stringContaining('fallback'),
+            { path: 'optimized', reason: 'redis-script-failure' },
+            'Optimized invalidation failed; using command fallback',
         );
     });
 
@@ -114,7 +114,7 @@ describe('bumpTagVersions', () => {
         expect(redis.callCounts.increment).toBe(2);
         expect(redis.callCounts.expire).toBe(2);
         expect(warn).toHaveBeenCalledWith(
-            expect.objectContaining({ primitive: 'bumpTagVersions', retry: false, error: 'Invalid tag-version response' }),
+            { path: 'optimized', reason: 'redis-script-failure' },
             'Optimized invalidation failed; using command fallback',
         );
     });
@@ -235,7 +235,7 @@ describe('deferred invalidation context', () => {
         ).resolves.toBe('completed');
 
         expect(error).toHaveBeenCalledWith(
-            { tagCount: 1, error: 'redis down' },
+            { path: 'deferred', reason: 'cache-invalidation-failed', tagCount: 1 },
             'Deferred cache invalidation failed',
         );
     });

@@ -149,6 +149,77 @@ describe('createCacheTagsExtension', () => {
         );
     });
 
+    test('keeps tenant identities and tag strings out of identity and debug logs', async () => {
+        const warn = vi.fn();
+        const debug = vi.fn();
+        const config = makeConfig({
+            logger: { debug, info: vi.fn(), warn, error: vi.fn() },
+        });
+        const tenantArgs = { where: { tenantId: 'secret-tenant' } };
+        const preparedKey = prepareCacheKey('Widget', 'findMany', tenantArgs, ['secret:tag'], ['tenant:secret-tenant'], config);
+        const cacheKey = buildVersionedCacheKey(preparedKey.baseKey, '0');
+        await redis.setString(
+            cacheKey,
+            serializeCacheEnvelope({ identity: 'foreign-identity', tenantScope: ['tenant:other-secret'], value: [{ secret: 'row' }] }),
+        );
+
+        await readThroughCache({
+            model: 'Widget',
+            operation: 'findMany',
+            args: tenantArgs,
+            cleanedArgs: tenantArgs,
+            preparedRead: {
+                cleanedArgs: tenantArgs,
+                normalizedTags: ['secret:tag'],
+                tenantScope: ['tenant:secret-tenant'],
+                preparedKey,
+            },
+            query: vi.fn().mockResolvedValue([{ id: 'fresh' }]),
+            cacheOptions: { debug: true },
+            config,
+            redisAdapter: redis,
+        });
+
+        await redis.setString(
+            cacheKey,
+            serializeCacheEnvelope({
+                identity: preparedKey.identity,
+                tenantScope: ['tenant:secret-tenant'],
+                value: [{ secret: 'row' }],
+            }),
+        );
+        await readThroughCache({
+            model: 'Widget',
+            operation: 'findMany',
+            args: tenantArgs,
+            cleanedArgs: tenantArgs,
+            preparedRead: {
+                cleanedArgs: tenantArgs,
+                normalizedTags: ['secret:tag'],
+                tenantScope: ['tenant:secret-tenant'],
+                preparedKey,
+            },
+            query: vi.fn().mockResolvedValue([{ id: 'fresh' }]),
+            cacheOptions: { debug: true },
+            config,
+            redisAdapter: redis,
+        });
+
+        const calls = JSON.stringify([...warn.mock.calls, ...debug.mock.calls]);
+        expect(calls).not.toContain('secret-tenant');
+        expect(calls).not.toContain('other-secret');
+        expect(calls).not.toContain('secret:tag');
+        expect(calls).not.toContain('secret');
+        expect(warn).toHaveBeenCalledWith(
+            { model: 'Widget', operation: 'findMany', path: 'fallback', reason: 'identity-mismatch' },
+            'Cache identity mismatch; bypassing cached value',
+        );
+        expect(debug).toHaveBeenCalledWith(
+            { model: 'Widget', operation: 'findMany', path: 'fallback', tagCount: 1 },
+            'Cache hit',
+        );
+    });
+
     test('bypasses unsupported reads with a bounded reason and dependency count', async () => {
         const onCacheEvent = vi.fn();
         const config = normalizeConfig({ schema: cacheSchema, models: cacheModels, metrics: { onCacheEvent } });
@@ -196,6 +267,77 @@ describe('createCacheTagsExtension', () => {
         ]));
         expect(replaced.normalizedTags).toEqual(['custom:read']);
         expect(replaced.tenantScope).toEqual(['organization:org_1']);
+    });
+
+    test('bypasses merged explicit tag overflow without populating Redis', async () => {
+        const unconstrained = makeConfig({ maxTagsPerQuery: 30 });
+        const args = { where: { organizationId: 'org_1' }, include: { equipment: true } };
+        const inferred = prepareRead('WorkOrder', 'findMany', args, args, { ttlSeconds: 60 }, unconstrained);
+        const config = makeConfig({ maxTagsPerQuery: inferred.normalizedTags.length });
+        const query = vi.fn().mockResolvedValue([{ id: 'wo_1' }]);
+
+        const result = await readThroughCache({
+            model: 'WorkOrder',
+            operation: 'findMany',
+            args,
+            cleanedArgs: args,
+            query,
+            cacheOptions: { ttlSeconds: 60, tags: ['explicit:overflow'] },
+            config,
+            redisAdapter: redis,
+        });
+
+        expect(result).toEqual([{ id: 'wo_1' }]);
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(redis.callCounts.mgetString ?? 0).toBe(0);
+        expect(redis.callCounts.setString ?? 0).toBe(0);
+        const prepared = prepareRead(
+            'WorkOrder',
+            'findMany',
+            args,
+            args,
+            { ttlSeconds: 60, tags: ['explicit:overflow'] },
+            config,
+        );
+        expect(prepared).toMatchObject({ cacheable: false, bypassReason: 'dependency-tag-limit' });
+        expect(prepared.normalizedTags).toContain('explicit:overflow');
+    });
+
+    test('bypasses replacement-only tag overflow while retaining the resolved tenant scope', async () => {
+        const config = makeConfig({ maxTagsPerQuery: 1 });
+        const args = { where: { organizationId: 'org_1' } };
+        const query = vi.fn().mockResolvedValue([{ id: 'wo_1' }]);
+
+        const result = await readThroughCache({
+            model: 'WorkOrder',
+            operation: 'findMany',
+            args,
+            cleanedArgs: args,
+            query,
+            cacheOptions: { ttlSeconds: 60, tags: ['explicit:one', 'explicit:two'], mergeTags: false },
+            config,
+            redisAdapter: redis,
+        });
+
+        expect(result).toEqual([{ id: 'wo_1' }]);
+        expect(query).toHaveBeenCalledTimes(1);
+        expect(redis.callCounts.mgetString ?? 0).toBe(0);
+        expect(redis.callCounts.setString ?? 0).toBe(0);
+        expect(
+            prepareRead(
+                'WorkOrder',
+                'findMany',
+                args,
+                args,
+                { ttlSeconds: 60, tags: ['explicit:one', 'explicit:two'], mergeTags: false },
+                config,
+            ),
+        ).toMatchObject({
+            cacheable: false,
+            bypassReason: 'dependency-tag-limit',
+            tenantScope: ['organization:org_1'],
+            normalizedTags: ['explicit:one', 'explicit:two'],
+        });
     });
 
     test('rejects normalized configs at the public boundary', () => {
@@ -458,7 +600,7 @@ describe('readThroughCache', () => {
             retry: false,
         });
         expect(warn).toHaveBeenCalledWith(
-            expect.objectContaining({ primitive: 'lookupVersioned', retry: false, error: 'Invalid versioned lookup response' }),
+            { path: 'lookupVersioned', reason: 'redis-script-failure' },
             'Redis cache script failed',
         );
     });
@@ -497,7 +639,7 @@ describe('readThroughCache', () => {
             retry: false,
         });
         expect(warn).toHaveBeenCalledWith(
-            expect.objectContaining({ primitive: 'populateAndRelease', retry: false, error: 'Invalid Redis script flag' }),
+            { path: 'populateAndRelease', reason: 'redis-script-failure' },
             'Redis cache script failed',
         );
         expect(redis.callCounts.deleteIfValue).toBe(1);
@@ -574,7 +716,7 @@ describe('readThroughCache', () => {
 
         expect(query).toHaveBeenCalledTimes(1);
         expect(warn).toHaveBeenCalledWith(
-            expect.objectContaining({ primitive: 'lookupVersioned', retry: false, error: 'script unavailable' }),
+            { path: 'lookupVersioned', reason: 'redis-script-failure' },
             'Redis cache script failed',
         );
         expect(onCacheEvent).toHaveBeenCalledWith({ model: 'Widget', operation: 'findMany', result: 'miss', path: 'fallback' });
@@ -770,7 +912,7 @@ describe('readThroughCache', () => {
         expect(result).toEqual([{ id: 'w1' }]);
         expect(query).toHaveBeenCalledWith(cleanedArgs);
         expect(warn).toHaveBeenCalledWith(
-            expect.objectContaining({ error: 'redis down' }),
+            { model: 'Widget', operation: 'findMany', path: 'fallback', reason: 'cache-read-failed' },
             'Cache read failed; falling back to Prisma query',
         );
         expect(onCacheEvent).toHaveBeenCalledWith({ model: 'Widget', operation: 'findMany', result: 'miss', path: 'fallback' });
@@ -887,13 +1029,7 @@ describe('readThroughCache', () => {
             reason: 'identity-mismatch',
         });
         expect(warn).toHaveBeenCalledWith(
-            expect.objectContaining({
-                model: 'Widget',
-                operation: 'findMany',
-                cacheKey,
-                expectedTenantScope: ['tenant-a'],
-                observedTenantScope: ['tenant-b'],
-            }),
+            { model: 'Widget', operation: 'findMany', path: 'fallback', reason: 'identity-mismatch' },
             expect.stringContaining('identity mismatch'),
         );
     });
@@ -938,7 +1074,7 @@ describe('readThroughCache', () => {
 
         expect(query).toHaveBeenCalledTimes(1);
         expect(error).toHaveBeenCalledWith(
-            expect.objectContaining({ model: 'Widget', operation: 'findMany', cacheKey, error: 'redis down' }),
+            { model: 'Widget', operation: 'findMany', path: 'fallback', reason: 'identity-mismatch-delete-failed' },
             expect.stringContaining('identity mismatch'),
         );
     });
@@ -1043,8 +1179,8 @@ describe('readThroughCache', () => {
         });
         expect(onCacheEvent).not.toHaveBeenCalledWith(expect.objectContaining({ result: 'hit' }));
         expect(error).toHaveBeenCalledWith(
-            expect.objectContaining({ model: 'Widget', operation: 'findMany', cacheKey, error: 'redis down' }),
-            expect.stringContaining('Invalid cache envelope'),
+            { model: 'Widget', operation: 'findMany', path: 'fallback', reason: 'invalid-envelope-delete-failed' },
+            'Invalid cache envelope deletion failed',
         );
     });
 });

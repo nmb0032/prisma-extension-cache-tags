@@ -44,13 +44,12 @@ export async function releaseCacheLock(lock: CacheLock, redisAdapter: RedisAdapt
 
         await redisAdapter.deleteIfValue(lock.key, lock.token);
     } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        config.logger.warn({ key: lock.key, error: errorMessage }, 'Failed to release cache lock');
+        config.logger.warn({ reason: 'cache-lock-release-failed' }, 'Failed to release cache lock');
     }
 }
 
 export async function waitForCachedValue<T>(
-    cacheKey: string,
+    _cacheKey: string,
     options: CacheReadOptions | undefined,
     config: NormalizedCacheConfig,
     _redisAdapter: RedisAdapter,
@@ -82,6 +81,6 @@ export async function waitForCachedValue<T>(
         delayMs = Math.min(delayMs * 2, pollMs);
     }
 
-    config.logger.debug({ cacheKey, waitMs }, 'Timed out waiting for cache lock owner');
+    config.logger.debug({ path: 'lock', reason: 'cache-lock-timeout' }, 'Timed out waiting for cache lock owner');
     return undefined;
 }

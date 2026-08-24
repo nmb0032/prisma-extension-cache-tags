@@ -87,7 +87,7 @@ describe('cache locks', () => {
 
         await expect(releaseCacheLock(lock, redis, loggingConfig)).resolves.toBeUndefined();
 
-        expect(warn).toHaveBeenCalledWith({ key: 'lock-key', error: 'redis down' }, 'Failed to release cache lock');
+        expect(warn).toHaveBeenCalledWith({ reason: 'cache-lock-release-failed' }, 'Failed to release cache lock');
     });
 
     test('returns null when the adapter cannot do conditional set', async () => {
